@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CRF Extraction Prototype</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <strong>CRF Extraction</strong>
+      <span class="muted">Visit 4 · prototype</span>
+    </div>
+    <div id="headerMeta" class="header-meta hidden">
+      <span id="fileName"></span>
+      <span class="pill pill-low" id="lowCount">0 low confidence</span>
+      <span class="pill pill-err" id="ruleCount">0 failed rules</span>
+    </div>
+    <div class="header-actions">
+      <button type="button" id="btnExport" class="btn" disabled>Export JSON</button>
+      <button type="button" id="btnRerun" class="btn btn-secondary" disabled>Re-run extraction</button>
+    </div>
+  </header>
+
+  <!-- Dropzone -->
+  <main id="dropView" class="drop-view">
+    <div id="dropzone" class="dropzone" tabindex="0">
+      <div class="dropzone-inner">
+        <div class="drop-icon">📄</div>
+        <h1>Drop a scanned CRF PDF</h1>
+        <p class="muted">3-page Visit 4 form · PDF only · Gemini extracts each page separately</p>
+        <button type="button" class="btn" id="btnBrowse">Choose PDF</button>
+        <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+      </div>
+    </div>
+  </main>
+
+  <!-- Progress / error overlay -->
+  <div id="overlay" class="overlay hidden">
+    <div class="card">
+      <div id="progressBlock">
+        <div class="spinner"></div>
+        <h2 id="progressTitle">Uploading…</h2>
+        <p id="progressDetail" class="muted"></p>
+      </div>
+      <div id="errorBlock" class="hidden">
+        <h2 class="error-title">Extraction failed</h2>
+        <p id="errorMessage" class="error-msg"></p>
+        <button type="button" class="btn" id="btnRetry">Retry</button>
+        <button type="button" class="btn btn-secondary" id="btnBack">Back</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <main id="resultView" class="result-view hidden">
+    <section class="pane pane-left">
+      <div class="pane-toolbar">
+        <div class="page-tabs" id="pageTabs"></div>
+        <div class="zoom-controls">
+          <button type="button" class="btn btn-small" id="zoomOut" title="Zoom out">−</button>
+          <span id="zoomLabel">100%</span>
+          <button type="button" class="btn btn-small" id="zoomIn" title="Zoom in">+</button>
+          <button type="button" class="btn btn-small" id="zoomReset" title="Reset">Fit</button>
+        </div>
+      </div>
+      <div class="image-stage" id="imageStage">
+        <img id="pageImage" alt="CRF page" draggable="false" />
+      </div>
+    </section>
+
+    <section class="pane pane-right">
+      <div class="validation-panel" id="validationPanel">
+        <h3>Validation</h3>
+        <div id="validationList" class="validation-list">
+          <p class="muted">No issues</p>
+        </div>
+      </div>
+      <div class="fields-scroll" id="fieldsScroll">
+        <div id="fieldsRoot"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
