@@ -1,88 +1,278 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CRF Extraction Prototype</title>
-  <link rel="stylesheet" href="/styles.css" />
-</head>
-<body>
-  <header class="app-header">
-    <div class="brand">
-      <strong>CRF Extraction</strong>
-      <span class="muted">Visit 4 · prototype</span>
-    </div>
-    <div id="headerMeta" class="header-meta hidden">
-      <span id="fileName"></span>
-      <span class="pill pill-low" id="lowCount">0 low confidence</span>
-      <span class="pill pill-err" id="ruleCount">0 failed rules</span>
-    </div>
-    <div class="header-actions">
-      <button type="button" id="btnExport" class="btn" disabled>Export JSON</button>
-      <button type="button" id="btnRerun" class="btn btn-secondary" disabled>Re-run extraction</button>
-    </div>
-  </header>
-
-  <!-- Dropzone -->
-  <main id="dropView" class="drop-view">
-    <div id="dropzone" class="dropzone" tabindex="0">
-      <div class="dropzone-inner">
-        <div class="drop-icon">📄</div>
-        <h1>Drop a scanned CRF PDF</h1>
-        <p class="muted">3-page Visit 4 form · PDF only · Gemini extracts each page separately</p>
-        <button type="button" class="btn" id="btnBrowse">Choose PDF</button>
-        <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Document Extraction — Webo Healthtech</title>
+    <link rel="icon" href="/static/brand/whpl-logo.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/static/brand/whpl-logo.png" alt="Webo Healthtech" />
+        <span class="divider" aria-hidden="true"></span>
+        <span class="product">Document Extraction</span>
       </div>
-    </div>
-  </main>
 
-  <!-- Progress / error overlay -->
-  <div id="overlay" class="overlay hidden">
-    <div class="card">
-      <div id="progressBlock">
-        <div class="spinner"></div>
-        <h2 id="progressTitle">Uploading…</h2>
-        <p id="progressDetail" class="muted"></p>
-      </div>
-      <div id="errorBlock" class="hidden">
-        <h2 class="error-title">Extraction failed</h2>
-        <p id="errorMessage" class="error-msg"></p>
-        <button type="button" class="btn" id="btnRetry">Retry</button>
-        <button type="button" class="btn btn-secondary" id="btnBack">Back</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Results -->
-  <main id="resultView" class="result-view hidden">
-    <section class="pane pane-left">
-      <div class="pane-toolbar">
-        <div class="page-tabs" id="pageTabs"></div>
-        <div class="zoom-controls">
-          <button type="button" class="btn btn-small" id="zoomOut" title="Zoom out">−</button>
-          <span id="zoomLabel">100%</span>
-          <button type="button" class="btn btn-small" id="zoomIn" title="Zoom in">+</button>
-          <button type="button" class="btn btn-small" id="zoomReset" title="Reset">Fit</button>
+      <div class="topbar-right">
+        <div id="credits-chip" class="credits-chip is-loading" tabindex="0">
+          <svg class="credit-ring" viewBox="0 0 36 36" aria-hidden="true">
+            <circle class="ring-track" cx="18" cy="18" r="15.5" />
+            <circle id="credit-arc" class="ring-arc" cx="18" cy="18" r="15.5" />
+          </svg>
+          <div class="credits-text">
+            <strong id="credits-remaining">—</strong>
+            <span>credits left</span>
+          </div>
+          <div class="credits-popover" role="tooltip">
+            <div class="pop-row"><span>Remaining</span><b id="pop-remaining">—</b></div>
+            <div class="pop-row"><span>Used this period</span><b id="pop-used">—</b></div>
+            <div class="pop-row"><span>Monthly allowance</span><b id="pop-total">—</b></div>
+            <div class="pop-foot" id="pop-renews"></div>
+          </div>
         </div>
       </div>
-      <div class="image-stage" id="imageStage">
-        <img id="pageImage" alt="CRF page" draggable="false" />
+    </header>
+
+    <main class="workspace" id="workspace">
+      <section class="intro">
+        <p class="eyebrow">Source document processing</p>
+        <h1>Turn source PDFs into <em>clean, reviewable text.</em></h1>
+        <p class="lede">
+          Upload a document, choose how carefully it should be read, and review the extracted
+          content side by side with the original page before you use it.
+        </p>
+      </section>
+
+      <div id="setup-error" class="notice notice-warn hidden"></div>
+
+      <ol class="steps">
+        <li class="card step" id="step-1">
+          <div class="step-head">
+            <span class="step-num">1</span>
+            <div>
+              <h2>Add your document</h2>
+              <p>PDF files up to <span id="max-mb">50</span> MB. Your file stays on this server.</p>
+            </div>
+          </div>
+
+          <label id="dropzone" class="dropzone" for="file-input">
+            <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+            <span class="drop-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M12 17v-5m0 0-2 2m2-2 2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <span class="drop-copy">
+              <strong>Drop a PDF here, or browse</strong>
+              <span>Scanned pages, forms and tables are all supported</span>
+            </span>
+          </label>
+
+          <div id="file-card" class="file-card hidden">
+            <span class="file-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <div class="file-meta">
+              <strong id="file-name"></strong>
+              <span id="file-detail"></span>
+            </div>
+            <button type="button" id="clear-file" class="link-btn">Replace</button>
+          </div>
+        </li>
+
+        <li class="card step" id="step-2">
+          <div class="step-head">
+            <span class="step-num">2</span>
+            <div>
+              <h2>Choose how carefully to read it</h2>
+              <p>More care means better tables and scans, and a higher credit cost per page.</p>
+            </div>
+          </div>
+          <div class="modes" id="modes" role="radiogroup" aria-label="Extraction mode"></div>
+        </li>
+
+        <li class="card step step-run" id="step-3">
+          <div class="run-summary">
+            <div class="run-line">
+              <span class="run-label">Document</span>
+              <strong id="run-file">No file selected</strong>
+            </div>
+            <div class="run-line">
+              <span class="run-label">Reading mode</span>
+              <strong id="run-mode">—</strong>
+            </div>
+            <div class="run-line">
+              <span class="run-label">Estimated cost</span>
+              <strong id="run-cost">—</strong>
+            </div>
+          </div>
+          <button id="run-btn" type="button" class="btn btn-primary btn-lg" disabled>
+            Extract document
+          </button>
+        </li>
+      </ol>
+
+      <div id="error-card" class="notice notice-error hidden">
+        <div>
+          <strong>Extraction didn't finish</strong>
+          <p id="error-copy"></p>
+        </div>
+        <button type="button" id="error-retry" class="btn btn-quiet">Try again</button>
+      </div>
+    </main>
+
+    <!-- ------------------------------------------------------------ processing -->
+    <div id="processing" class="processing hidden" role="status" aria-live="polite">
+      <div class="processing-inner">
+        <div class="processing-head">
+          <div class="ring-wrap">
+            <svg class="spin-ring" viewBox="0 0 60 60" aria-hidden="true">
+              <circle class="spin-track" cx="30" cy="30" r="26" />
+              <circle class="spin-arc" cx="30" cy="30" r="26" />
+            </svg>
+            <span class="ring-time" id="elapsed">0:00</span>
+          </div>
+          <div class="processing-copy">
+            <h2 id="processing-title">Reading your document</h2>
+            <p id="processing-file"></p>
+          </div>
+        </div>
+
+        <ol class="stages" id="stages">
+          <li data-stage="upload"><span class="stage-dot"></span><span>Uploading document</span></li>
+          <li data-stage="queue"><span class="stage-dot"></span><span>Waiting for a reader</span></li>
+          <li data-stage="read"><span class="stage-dot"></span><span>Reading pages and rebuilding tables</span></li>
+          <li data-stage="finish"><span class="stage-dot"></span><span>Preparing your document</span></li>
+        </ol>
+
+        <div class="skeleton" aria-hidden="true">
+          <div class="sk-page">
+            <span class="sk-line w-40 h-lg"></span>
+            <span class="sk-line w-90"></span>
+            <span class="sk-line w-80"></span>
+            <span class="sk-line w-85"></span>
+            <span class="sk-block"></span>
+            <span class="sk-line w-70"></span>
+            <span class="sk-line w-88"></span>
+          </div>
+        </div>
+
+        <p class="processing-foot" id="processing-foot"></p>
+      </div>
+    </div>
+
+    <!-- ---------------------------------------------------------------- viewer -->
+    <section id="viewer" class="viewer hidden" aria-label="Extracted document">
+      <header class="viewer-bar">
+        <div class="vb-row vb-top">
+          <button type="button" id="viewer-back" class="btn btn-quiet btn-back">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+              <path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            New document
+          </button>
+
+          <div class="vb-title">
+            <h2 id="result-title">Extracted document</h2>
+            <div class="chips" id="result-chips"></div>
+          </div>
+
+          <div class="vb-actions">
+            <button type="button" class="btn btn-quiet" id="copy-btn">Copy text</button>
+            <div class="menu-wrap">
+              <button type="button" class="btn btn-primary" id="download-btn">
+                Download
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <div class="menu hidden" id="download-menu">
+                <button type="button" data-dl="word"><b>Word document</b><span>.docx — ready to edit</span></button>
+                <button type="button" data-dl="text"><b>Plain text</b><span>.txt — words only</span></button>
+                <button type="button" data-dl="markdown"><b>Markdown</b><span>.md — keeps structure</span></button>
+                <button type="button" data-dl="print"><b>Print or save as PDF</b><span>Opens your print dialog</span></button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="vb-row vb-tools">
+          <div class="segmented" id="layout-toggle" role="group" aria-label="Layout">
+            <button type="button" data-layout="split" class="active">Side by side</button>
+            <button type="button" data-layout="extracted">Extracted only</button>
+            <button type="button" data-layout="original">Original only</button>
+          </div>
+
+          <div class="segmented" id="format-toggle" role="group" aria-label="Text format">
+            <button type="button" data-format="formatted" class="active">Formatted</button>
+            <button type="button" data-format="markdown">Markdown</button>
+            <button type="button" data-format="plain">Plain text</button>
+          </div>
+
+          <div class="search">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/>
+              <path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+            <input id="search-input" type="search" placeholder="Find in document" autocomplete="off" />
+            <span class="search-count" id="search-count"></span>
+            <button type="button" id="search-prev" class="icon-btn" title="Previous match" disabled>&#8593;</button>
+            <button type="button" id="search-next" class="icon-btn" title="Next match" disabled>&#8595;</button>
+          </div>
+
+          <div class="zoom">
+            <button type="button" id="zoom-out" class="icon-btn" title="Smaller text">&minus;</button>
+            <span id="zoom-level">100%</span>
+            <button type="button" id="zoom-in" class="icon-btn" title="Larger text">+</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="viewer-stage" id="viewer-stage" data-layout="split">
+        <section class="pane pane-original" id="pane-original">
+          <div class="pane-head">
+            <span>Original document</span>
+            <small>As supplied</small>
+          </div>
+          <div class="pane-body">
+            <iframe id="original-frame" title="Original PDF"></iframe>
+            <div class="pane-empty" id="original-empty">
+              The original file is no longer loaded in this browser session.
+            </div>
+          </div>
+        </section>
+
+        <div class="pane-split" aria-hidden="true"></div>
+
+        <section class="pane pane-extracted" id="pane-extracted">
+          <div class="pane-head">
+            <span>Extracted text</span>
+            <small id="extracted-note">Review before use</small>
+          </div>
+          <div class="pane-body" id="extracted-scroll">
+            <div id="doc-formatted" class="doc-pages"></div>
+            <pre id="doc-markdown" class="doc-source hidden"></pre>
+            <pre id="doc-plain" class="doc-source hidden"></pre>
+          </div>
+        </section>
       </div>
     </section>
 
-    <section class="pane pane-right">
-      <div class="validation-panel" id="validationPanel">
-        <h3>Validation</h3>
-        <div id="validationList" class="validation-list">
-          <p class="muted">No issues</p>
-        </div>
-      </div>
-      <div class="fields-scroll" id="fieldsScroll">
-        <div id="fieldsRoot"></div>
-      </div>
-    </section>
-  </main>
-
-  <script src="/app.js"></script>
-</body>
+    <script src="/static/vendor/marked.min.js"></script>
+    <script src="/static/vendor/purify.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
 </html>
