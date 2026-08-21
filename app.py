@@ -1,8 +1,7 @@
 """Webo Healthtech — Document Extraction service.
 
-Turns source PDFs into clean, reviewable text. The upstream processing vendor is an
-implementation detail: every string that can reach the browser is written in the
-product's own voice.
+The upstream processing vendor is an implementation detail: every string that can
+reach the browser is written in the product's own voice.
 """
 
 from __future__ import annotations
@@ -66,38 +65,25 @@ MODES: list[dict[str, Any]] = [
     {
         "id": "high",
         "name": "High Accuracy",
-        "tagline": "Most source documents",
-        "description": "Reads each page carefully, rebuilding complex tables, forms and scanned text.",
-        "best_for": "Source documents, CRFs, lab reports and scanned records",
+        "tagline": "Typed and printed pages",
+        "description": "Reads each page carefully, rebuilding complex tables, forms and printed scans. Handwriting can be misread.",
+        "best_for": "Typed protocols, reports, lab printouts and clean scans",
         "credits_per_page": 10,
         "speed": "One to two minutes",
         "accuracy": 3,
-        "recommended": True,
     },
     {
         "id": "maximum",
         "name": "Maximum Accuracy",
-        "tagline": "Hardest pages",
-        "description": "The most thorough read available. Built for poor scans, handwriting and dense clinical tables.",
-        "best_for": "Difficult scans, handwritten notes and heavily formatted tables",
+        "tagline": "Handwritten source documents",
+        "description": "The most thorough read available. Needed for handwriting and tick boxes — it reads character-box fields correctly where lighter modes drop or misread digits.",
+        "best_for": "Completed CRFs, handwritten notes and poor-quality scans",
         "credits_per_page": 45,
         "speed": "Several minutes",
         "accuracy": 4,
+        "recommended": True,
     },
 ]
-
-# The AI reading tiers treat a repeated page banner as boilerplate and silently drop
-# it. On a clinical source document that banner carries the identifiers — protocol
-# number, screening number, subject initials, visit and visit date — so we ask for a
-# complete transcription instead.
-PARSER_INSTRUCTIONS = (
-    "Transcribe every element on the page, including header and footer blocks: site or "
-    "hospital names, protocol numbers, screening numbers, subject initials, visit "
-    "numbers and visit dates. Never omit a header or footer just because it repeats on "
-    "other pages. Preserve form field labels together with their printed or handwritten "
-    "values, and show checkboxes as [x] when ticked and [ ] when empty. Keep tabular "
-    "content as markdown tables."
-)
 
 MODE_IDS = {mode["id"] for mode in MODES}
 CREDITS_PER_PAGE = {mode["id"]: mode["credits_per_page"] for mode in MODES}
@@ -386,20 +372,12 @@ async def create_extraction(
         )
 
     client = get_client()
-    create_kwargs: dict[str, Any] = {
-        "upload_file": (filename, contents, file.content_type or "application/pdf"),
-        "tier": tier,
-        "version": "latest",
-        "processing_options": {"ocr_parameters": {"languages": ["en"]}},
-    }
-    if tier != "fast":
-        create_kwargs["output_options"] = {
-            "markdown": {"tables": {"output_tables_as_markdown": True}},
-        }
-        create_kwargs["agentic_options"] = {"custom_prompt": PARSER_INSTRUCTIONS}
-
     try:
-        job = await client.parsing.create(**create_kwargs)
+        job = await client.parsing.create(
+            upload_file=(filename, contents, file.content_type or "application/pdf"),
+            tier=tier,
+            version="latest",
+        )
     except HTTPException:
         raise
     except Exception as exc:

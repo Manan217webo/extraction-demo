@@ -64,7 +64,7 @@ const els = {
 
 const state = {
   modes: [],
-  modeId: "high",
+  modeId: "maximum",
   file: null,
   pages: null,
   result: null,

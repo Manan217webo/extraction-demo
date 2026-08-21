@@ -213,14 +213,6 @@ button, input, select { font: inherit; color: inherit; }
   padding: 44px 24px 90px;
 }
 .intro { max-width: 720px; margin-bottom: 34px; }
-.intro h1 {
-  font-size: clamp(32px, 4.4vw, 50px);
-  line-height: 1.05;
-  letter-spacing: -0.045em;
-  margin: 0 0 16px;
-  font-weight: 800;
-}
-.intro h1 em { font-style: normal; color: var(--purple); }
 .lede { font-size: 17px; color: var(--muted); margin: 0; }
 
 .steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
