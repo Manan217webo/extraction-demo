@@ -47,6 +47,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 MAX_BYTES = 50 * 1024 * 1024
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
+HEADER_PAGE_LIMIT = max(1, int(os.getenv("HEADER_PAGE_LIMIT") or 3))
 API_BASE = (os.getenv("LLAMA_CLOUD_BASE_URL") or "https://api.cloud.llamaindex.ai").rstrip("/")
 
 GENERIC_FAILURE = "We couldn't process this document. Please try again."
@@ -502,23 +503,27 @@ def _document_meta(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _parse_artifacts(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Text and page layout for a finished job, fetched once and kept.
-
-    This is the only place the layout items are pulled, because they dwarf the
-    text and are needed only when a document is being mapped onto a form.
-    """
-    meta = _jobs.setdefault(
+def _job_meta(job_id: str) -> dict[str, Any]:
+    return _jobs.setdefault(
         job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None}
     )
-    if meta.get("parse"):
-        return meta, meta["parse"]
 
+
+def _parse_lock(meta: dict[str, Any]) -> asyncio.Lock:
+    """One fetch per job even when the header and the layout are wanted at once."""
+    lock = meta.get("lock")
+    if lock is None:
+        lock = meta["lock"] = asyncio.Lock()
+    return lock
+
+
+async def _fetch(job_id: str, meta: dict[str, Any], with_items: bool) -> Any:
     tier = meta.get("tier") or TIER_FOR_MODE[DEFAULT_MODE]
     client = get_client()
+    started = time.monotonic()
     try:
         result = await client.parsing.get(
-            job_id=job_id, expand=_expand_for(tier, with_items=True)
+            job_id=job_id, expand=_expand_for(tier, with_items=with_items)
         )
     except llama_cloud.NotFoundError as exc:
         raise HTTPException(status_code=404, detail="That extraction could not be found.") from exc
@@ -530,34 +535,89 @@ async def _parse_artifacts(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]
             status_code=409,
             detail="That document hasn't finished extracting yet. Please try again.",
         )
+    log.info("fetched %s (items=%s) in %.1fs", job_id, with_items,
+             time.monotonic() - started)
+    return result
 
-    payload = _serialize(result, meta)
-    meta["parse"] = {
-        "markdown": payload["markdown"],
-        "pages": payload["pages"],
-        "items": _layout_pages(result),
-    }
-    log.info(
-        "cached parse for %s: %s page(s), %s layout page(s)",
-        job_id, len(meta["parse"]["pages"]), len(meta["parse"]["items"]),
-    )
-    return meta, meta["parse"]
+
+async def _parse_artifacts(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Text and page layout for a finished job, fetched once and kept.
+
+    This is the only place the layout items are pulled, because they dwarf the
+    text — roughly a third of a second per page — and are needed only to draw
+    values back onto the original.
+    """
+    meta = _job_meta(job_id)
+    async with _parse_lock(meta):
+        if meta.get("parse"):
+            return meta, meta["parse"]
+
+        result = await _fetch(job_id, meta, with_items=True)
+        started = time.monotonic()
+        payload = _serialize(result, meta)
+        meta["parse"] = {
+            "markdown": payload["markdown"],
+            "pages": payload["pages"],
+            "items": _layout_pages(result),
+        }
+        log.info(
+            "cached parse for %s: %s page(s), %s layout page(s), prepared in %.1fs",
+            job_id, len(meta["parse"]["pages"]), len(meta["parse"]["items"]),
+            time.monotonic() - started,
+        )
+        return meta, meta["parse"]
+
+
+async def _header_pages(job_id: str, meta: dict[str, Any]) -> list[dict[str, Any]]:
+    """The first few pages of text — all the header block can be on.
+
+    Fetched without the layout items so it comes back in about a second, which
+    lets the header be read while the layout is still downloading.
+    """
+    if meta.get("parse"):
+        return (meta["parse"].get("pages") or [])[:HEADER_PAGE_LIMIT]
+
+    result = await _fetch(job_id, meta, with_items=False)
+    pages = _pages_from(getattr(result, "markdown", None), "markdown") \
+        or _pages_from(getattr(result, "text", None), "text")
+    if not pages:
+        whole = _tidy(getattr(result, "markdown_full", None)) \
+            or getattr(result, "text_full", None) or ""
+        pages = [{"page_number": 1, "content": whole}]
+    return pages[:HEADER_PAGE_LIMIT]
 
 
 @app.post("/api/documents/{job_id}/header")
 async def read_header(job_id: str) -> dict[str, Any]:
     """Step one: what we believe the document's header block says."""
-    meta, parse = await _parse_artifacts(job_id)
-    document = fields.document_for_model(parse.get("pages") or [], parse.get("markdown") or "")
+    meta = _job_meta(job_id)
+    started = time.monotonic()
 
+    # The layout download is the slow half and the model call does not need it,
+    # so the two run together rather than one after the other.
+    layout = asyncio.create_task(_parse_artifacts(job_id))
     try:
-        result = await fields.extract_header(document)
-    except fields.ExtractionUnavailable as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        pages = await _header_pages(job_id, meta)
+        document = fields.document_for_model(pages, "")
+        log.info("header prompt for %s: %s page(s), %s chars",
+                 job_id, len(pages), len(document))
+
+        read_started = time.monotonic()
+        try:
+            result = await fields.extract_header(document)
+        except fields.ExtractionUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        log.info("header read for %s in %.1fs", job_id, time.monotonic() - read_started)
+
+        meta, parse = await layout
+    except BaseException:
+        layout.cancel()
+        raise
 
     index = anchors.PageIndex(parse.get("items") or [])
     header = mapping.build_header(result["values"], index)
     meta["header_rows"] = result["values"]
+    log.info("header stage for %s took %.1fs", job_id, time.monotonic() - started)
 
     return {
         "document": _document_meta(job_id, meta),
@@ -566,6 +626,7 @@ async def read_header(job_id: str) -> dict[str, Any]:
         "summary": header["summary"],
         "anchoring": bool(index),
         "truncated": fields.was_truncated(document),
+        "header_pages_read": len(pages),
         "usage": result.get("usage", {}),
     }
 
@@ -632,15 +693,21 @@ async def map_to_form(job_id: str, request: MapRequest) -> dict[str, Any]:
 
     document = fields.document_for_model(parse.get("pages") or [], parse.get("markdown") or "")
     index = anchors.PageIndex(parse.get("items") or [])
+    log.info("form prompt for %s: %s page(s), %s chars",
+             job_id, len(parse.get("pages") or []), len(document))
 
     header = mapping.build_header(meta.get("header_rows") or [], index)
     _apply_header_edits(header, request.header)
     confirmed = mapping.header_values(header["groups"])
 
+    started = time.monotonic()
     try:
         result = await fields.extract_form(document, form, confirmed)
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    log.info("form read for %s in %.1fs (%s value(s), %s repaired, %s dropped)",
+             job_id, time.monotonic() - started, len(result["values"]),
+             result.get("repaired", 0), result.get("dropped", 0))
 
     payload = {
         "document": _document_meta(job_id, meta),
