@@ -849,6 +849,24 @@ mark.current { background: var(--purple); color: #fff; }
 .stepper button.active b { background: var(--purple); color: #fff; }
 .stepper button.done b { background: #e3f7ef; color: #1e7d5e; }
 .stepper button:disabled { opacity: 0.45; cursor: not-allowed; }
+.stepper-gap { flex: 1; }
+.stepper button.step-aside {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom-color: transparent;
+}
+.stepper button.step-aside.active {
+  color: var(--purple);
+  border-bottom-color: var(--purple);
+}
+.stepper button.step-aside span { display: inline !important; }
+
+@keyframes fieldFlash {
+  0%, 100% { background: transparent; }
+  25%      { background: #fdeef1; }
+}
+.field.is-flash { animation: fieldFlash 0.75s ease 1; }
 
 /* ============================================================ pdf original */
 

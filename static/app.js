@@ -50,7 +50,6 @@ const els = {
   stepper: $("stepper"),
   vbActions: $("vb-actions"),
   toolsExtract: $("tools-extract"),
-  toHeader: $("to-header"),
   extractedHeading: $("extracted-heading"),
 
   panelExtract: $("panel-extract"),
@@ -118,7 +117,7 @@ const state = {
   selectedKey: null,
 };
 
-const STAGE_ORDER = ["upload", "queue", "read", "finish"];
+const STAGE_ORDER = ["upload", "queue", "read", "finish", "fields"];
 const RING = 97.4; // circumference of the credit ring
 
 marked.setOptions({ gfm: true, breaks: true });
@@ -407,14 +406,40 @@ async function pollOnce(jobId) {
   if (status === "RUNNING") setStage("read");
   if (status === "COMPLETED") {
     setStage("finish");
+    await new Promise((resolve) => setTimeout(resolve, 320));
+
+    // Reading the header is part of getting the document ready, not a separate
+    // thing to click, so it happens under the same spinner.
+    let header = null;
+    let headerError = null;
+    if (state.mappingReady) {
+      setStage("fields");
+      try {
+        header = await api(`/api/documents/${encodeURIComponent(jobId)}/header`, {
+          method: "POST",
+        });
+      } catch (err) {
+        headerError = err.message;
+      }
+    }
+
     [...els.stages.children].forEach((li) => {
       li.classList.add("done");
       li.classList.remove("active");
     });
-    // Let the completed checklist register before swapping to the result.
-    await new Promise((resolve) => setTimeout(resolve, 420));
+    await new Promise((resolve) => setTimeout(resolve, 260));
     stopProcessing();
-    showResult(data);
+
+    showResult(data, header ? "header" : "extract");
+    if (header) {
+      state.header = header;
+      renderHeader(header);
+      enableStep("header");
+      enableStep("form");
+      setStep("header");
+    } else if (headerError) {
+      showError(`The document was read, but the header couldn't be matched. ${headerError}`);
+    }
     refreshCredits(true);
     els.runBtn.disabled = false;
     return true;
@@ -448,7 +473,7 @@ function decorate(root) {
   });
 }
 
-function showResult(data) {
+function showResult(data, landing) {
   state.result = data;
   const mode = state.modes.find((m) => m.id === data.mode);
   const markdown = data.markdown || data.text || "";
@@ -507,11 +532,10 @@ function showResult(data) {
   showOriginal();
 
   resetMapping();
-  if (state.mappingReady) enableStep("header");
-  setStep("extract");
   setFormat("formatted");
   setLayout("split");
   clearSearch();
+  setStep(landing || "extract");
   els.viewer.classList.remove("hidden");
   document.body.classList.add("viewing");
   els.extractedScroll.scrollTop = 0;
@@ -632,7 +656,7 @@ function resetMapping() {
   els.formBody.classList.add("hidden");
   els.formPicker.classList.remove("hidden");
   setHighlights([]);
-  [...els.stepper.children].forEach((button) => {
+  [...els.stepper.querySelectorAll("button")].forEach((button) => {
     button.disabled = button.dataset.step !== "extract";
     button.classList.remove("done");
   });
@@ -645,13 +669,10 @@ function enableStep(step) {
 
 function setStep(step) {
   state.step = step;
-  [...els.stepper.children].forEach((button) => {
+  [...els.stepper.querySelectorAll("button")].forEach((button) => {
     const own = button.dataset.step;
     button.classList.toggle("active", own === step);
-    button.classList.toggle(
-      "done",
-      (own === "extract" && step !== "extract") || (own === "header" && step === "form")
-    );
+    button.classList.toggle("done", own === "header" && step === "form");
   });
 
   els.panelExtract.classList.toggle("hidden", step !== "extract");
@@ -661,7 +682,6 @@ function setStep(step) {
   els.toolsExtract.classList.toggle("hidden", step !== "extract");
   els.copyBtn.classList.toggle("hidden", step !== "extract");
   els.downloadBtn.parentElement.classList.toggle("hidden", step !== "extract");
-  els.toHeader.classList.toggle("hidden", step !== "extract");
 
   els.extractedHeading.textContent =
     step === "extract" ? "Extracted text"
@@ -671,12 +691,9 @@ function setStep(step) {
     step === "extract" ? "Always check against the original"
       : "Red boxes show what was used";
 
-  // Only the values on show should be boxed on the page.
-  if (step === "header") setHighlights(state.header ? state.header.highlights : []);
-  else if (step === "form") setHighlights(state.payload ? state.payload.highlights : []);
-  else setHighlights([]);
+  refreshHighlights();
 
-  if (step !== "extract") setLayout(els.stage.dataset.layout === "extracted" ? "split" : els.stage.dataset.layout);
+  if (step !== "extract" && els.stage.dataset.layout === "extracted") setLayout("split");
   els.extractedScroll.scrollTop = 0;
 }
 
@@ -861,7 +878,20 @@ function selectField(key, origin, { scroll = true } = {}) {
   const row = els.extractedScroll.querySelector(`.field[data-key="${cssEscape(key)}"]`);
   if (row) {
     row.classList.add("is-selected");
-    if (origin === "pdf") row.scrollIntoView({ block: "center", behavior: "smooth" });
+    if (origin === "pdf") {
+      // Computed against the pane rather than scrollIntoView, whose smooth
+      // behaviour does not reliably drive this nested scroller.
+      const pane = els.extractedScroll;
+      const target =
+        row.offsetTop - pane.clientHeight / 2 + row.offsetHeight / 2;
+      // Instant, not smooth: smooth scrolling is a no-op on this pane in Chrome.
+      // The flash below is what signals the jump.
+      pane.scrollTop = Math.max(target, 0);
+      // A scroll alone is easy to miss on a long form.
+      row.classList.remove("is-flash");
+      void row.offsetWidth;
+      row.classList.add("is-flash");
+    }
   }
   if (state.pdf) state.pdf.focus(key, { scroll: scroll && origin !== "pdf" });
 }
@@ -901,14 +931,17 @@ function collectHighlights(container) {
 }
 
 function refreshHighlights() {
+  // Only the values with an input on screen are boxed. A box whose field is not
+  // in the visible panel could not be selected, which is what made the page and
+  // the form feel unrelated.
   if (state.step === "header" && state.header) {
     state.header.highlights = collectHighlights(state.header.header);
     setHighlights(state.header.highlights);
   } else if (state.step === "form" && state.payload) {
-    state.payload.highlights = collectHighlights(state.payload.form).concat(
-      collectHighlights(state.payload.header)
-    );
+    state.payload.highlights = collectHighlights(state.payload.form);
     setHighlights(state.payload.highlights);
+  } else {
+    setHighlights([]);
   }
 }
 
@@ -917,7 +950,7 @@ function refreshHighlights() {
 async function loadHeader() {
   if (!state.result || !state.result.job_id) return;
   setStep("header");
-  if (state.header) return;
+  if (state.header || !state.mappingReady) return;
 
   busy("Reading the document header… this can take a minute on a long document.");
   try {
@@ -1143,7 +1176,7 @@ function renderForm(payload) {
     els.formSections.appendChild(card);
   });
 
-  payload.highlights = collectHighlights(payload.form).concat(collectHighlights(payload.header));
+  payload.highlights = collectHighlights(payload.form);
   setHighlights(payload.highlights);
 }
 
@@ -1225,7 +1258,6 @@ async function sendToCronos() {
 /* ------------------------------------------------------------------- wiring */
 
 function wireMapping() {
-  els.toHeader.addEventListener("click", loadHeader);
   els.headerConfirm.addEventListener("click", chooseForm);
   els.formChange.addEventListener("click", chooseForm);
   els.dlCrfPdf.addEventListener("click", () => exportCrf("pdf"));
@@ -1239,8 +1271,12 @@ function wireMapping() {
   els.stepper.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-step]");
     if (!button || button.disabled) return;
-    if (button.dataset.step === "header") loadHeader();
-    else setStep(button.dataset.step);
+    const step = button.dataset.step;
+    // Each step owns whatever fetching it needs, so arriving from the stepper
+    // behaves the same as arriving from the button on the previous step.
+    if (step === "header") loadHeader();
+    else if (step === "form") state.payload ? setStep("form") : chooseForm();
+    else setStep(step);
   });
 
   els.panelHeader.addEventListener("click", (event) => {
@@ -1489,9 +1525,11 @@ document.addEventListener("keydown", (event) => {
     state.cronos = (session.mapping || {}).cronos || null;
     els.maxMb.textContent = String(session.max_file_mb || 50);
     if (!state.mappingReady) {
-      els.toHeader.disabled = true;
-      els.toHeader.title =
-        "CRF mapping isn't configured yet. Please contact your administrator.";
+      els.stepper.querySelectorAll('button[data-step="header"], button[data-step="form"]')
+        .forEach((button) => {
+          button.title =
+            "CRF mapping isn't configured yet. Please contact your administrator.";
+        });
     }
 
     renderModes();

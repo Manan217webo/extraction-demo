@@ -44,6 +44,7 @@
       this.scale = 1;
       this.observer = null;
       this.renderToken = 0;
+      this._pending = null;
 
       this._onResize = debounce(() => this.relayout(), 180);
       window.addEventListener("resize", this._onResize);
@@ -79,6 +80,16 @@
     }
 
     async relayout() {
+      // Serialised: a resize while a relayout is still awaiting getPage would
+      // otherwise leave half-built pages behind.
+      this._pending = Promise.resolve(this._pending).then(
+        () => this._relayout(),
+        () => this._relayout()
+      );
+      return this._pending;
+    }
+
+    async _relayout() {
       if (!this.doc) return;
       const token = ++this.renderToken;
 
@@ -128,6 +139,18 @@
       );
       this.pages.forEach((page) => this.observer.observe(page.wrap));
       this.drawHighlights();
+      this._renderVisible(token);
+    }
+
+    _renderVisible(token) {
+      const top = this.container.scrollTop;
+      const bottom = top + this.container.clientHeight + 300;
+      this.pages.forEach((page, number) => {
+        const start = page.wrap.offsetTop;
+        if (start + page.wrap.offsetHeight >= top - 300 && start <= bottom) {
+          this._render(number, token);
+        }
+      });
     }
 
     _size(number, viewport) {
@@ -155,14 +178,20 @@
       page.rendered = true;
       try {
         const pdfPage = await this.doc.getPage(number);
-        if (token !== this.renderToken) return;
+        if (token !== this.renderToken) {
+          page.rendered = false; // superseded by a relayout; let it be retried
+          return;
+        }
         const viewport = pdfPage.getViewport({ scale: this.scale });
         this._size(number, viewport);
         const ratio = window.devicePixelRatio || 1;
         const context = page.canvas.getContext("2d", { alpha: false });
         context.setTransform(ratio, 0, 0, ratio, 0, 0);
         await pdfPage.render({ canvasContext: context, viewport }).promise;
-        if (token !== this.renderToken) return;
+        if (token !== this.renderToken) {
+          page.rendered = false;
+          return;
+        }
         page.wrap.classList.add("is-rendered");
         this.drawHighlights(number);
       } catch (error) {
@@ -225,9 +254,10 @@
           box.style.top = `${rect.y * 100}%`;
           box.style.width = `${rect.w * 100}%`;
           box.style.height = `${rect.h * 100}%`;
+          const estimated = rect.approximate ? "\n≈ approximate position" : "";
           box.title = items
             .map((item) => `${item.label}: ${item.value === null ? "—" : item.value}`)
-            .join("\n");
+            .join("\n") + estimated;
           box.setAttribute("aria-label", box.title.replace(/\n/g, ", "));
           box.addEventListener("click", (event) => {
             event.preventDefault();

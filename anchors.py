@@ -22,6 +22,7 @@ MIN_FUZZY_RATIO = 0.62
 MIN_FUZZY_CHARS = 4
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
+_SEPARATOR_ROW = re.compile(r"^[\s|:+-]+$")
 
 
 def _normalise(text: str) -> tuple[str, list[int]]:
@@ -118,6 +119,31 @@ class PageIndex:
             return None
         return self._to_original(entry, block.a, block.a + block.size, block.size / len(needle))
 
+    def _narrow_to_value(self, entry: dict[str, Any], start: int, end: int,
+                         value: Any) -> tuple[int, int]:
+        """Shrink an evidence match down to the value inside it.
+
+        The model quotes enough context to locate a value — often a whole table
+        row — so the quote alone would put the box on the row's first cell. The
+        value is searched for inside the quoted span, which is what the box should
+        actually sit on.
+        """
+        if value is None:
+            return start, end
+        needle, _ = _normalise(str(value))
+        needle = needle.strip()
+        if not needle:
+            return start, end
+
+        window = entry["raw"][start:end]
+        norm, mapping = _normalise(window)
+        position = norm.find(needle)
+        if position < 0 or not mapping:
+            return start, end
+        first = mapping[position]
+        last = mapping[min(position + len(needle), len(mapping)) - 1] + 1
+        return start + first, start + last
+
     @staticmethod
     def _to_original(entry: dict[str, Any], start: int, end: int,
                      score: float) -> tuple[int, int, float]:
@@ -129,32 +155,93 @@ class PageIndex:
         return first, last, score
 
     def _rects(self, entry: dict[str, Any], start: int, end: int) -> list[dict[str, float]]:
-        """Boxes covering [start, end) — by character range where the parser gives one."""
-        boxes = entry["bbox"]
-        chosen = [
+        """Boxes covering [start, end), narrowed to the line or cell where possible."""
+        boxes = [box for box in entry["bbox"] if self._usable(box)]
+        ranged = [
             box for box in boxes
             if box.get("start_index") is not None and box.get("end_index") is not None
-            and box["start_index"] < end and box["end_index"] > start
         ]
-        if not chosen:
-            indexed = any(box.get("start_index") is not None for box in boxes)
-            # An item whose boxes carry no ranges can still be located as a whole;
-            # one that has ranges but none overlapping is a genuine miss.
-            chosen = [] if indexed else list(boxes)
-        return [self._scale(entry, box) for box in chosen if self._usable(box)]
 
-    def _usable(self, box: dict[str, Any]) -> bool:
+        if ranged:
+            hits = [box for box in ranged
+                    if box["start_index"] < end and box["end_index"] > start]
+            # Boxes carry ranges but none covers the match: a genuine miss, not a
+            # reason to fall back to boxing the whole item.
+            return [rect for box in hits
+                    for rect in self._narrow(entry, box, box["start_index"],
+                                             box["end_index"], start, end)]
+
+        # No ranges at all — each box is assumed to cover the item's whole text.
+        return [rect for box in boxes
+                for rect in self._narrow(entry, box, 0, len(entry["raw"]), start, end)]
+
+    def _narrow(self, entry: dict[str, Any], box: dict[str, Any], box_start: int,
+                box_end: int, start: int, end: int) -> list[dict[str, float]]:
+        """Shrink a box that spans many lines down to the line actually matched.
+
+        The parser returns a single box for a whole table and for a multi-line
+        paragraph, so without this every value in a table would be drawn over the
+        entire table. Lines are evenly spaced in practice, so the row a value came
+        from can be interpolated reliably.
+
+        Columns deliberately are not subdivided. The only proxy available is the
+        markdown column padding, which follows content length rather than the
+        rendered layout, and on a scan there is no text layer to check against — a
+        box over the wrong cell would be worse than an honest box over the row.
+        """
+        text = entry["raw"][box_start:box_end]
+        lines = text.split("\n")
+        is_table = entry.get("type") == "table"
+
+        # A single-line box is already as tight as the parser can make it.
+        if len(lines) <= 1:
+            return [self._scale(entry, box)]
+
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        for line in lines:
+            spans.append((cursor, cursor + len(line)))
+            cursor += len(line) + 1
+
+        offset = max(start - box_start, 0)
+        line_index = next(
+            (i for i, (_, stop) in enumerate(spans) if stop > offset), len(lines) - 1
+        )
+
+        # A pipe table's rule row occupies no height on the page.
+        rows = [
+            i for i, line in enumerate(lines)
+            if line.strip() and not _SEPARATOR_ROW.match(line)
+        ] if is_table else list(range(len(lines)))
+        if line_index not in rows:
+            return [self._scale(entry, box)]
+
+        position = rows.index(line_index)
+        scaled = self._scale(entry, {
+            "x": box["x"],
+            "y": box["y"] + box["h"] * position / len(rows),
+            "w": box["w"],
+            "h": box["h"] / len(rows),
+        })
+        scaled["approximate"] = True
+        return [scaled]
+
+    @staticmethod
+    def _usable(box: dict[str, Any]) -> bool:
         return all(isinstance(box.get(k), (int, float)) for k in ("x", "y", "w", "h")) \
             and box["w"] > 0 and box["h"] > 0
 
     def _scale(self, entry: dict[str, Any], box: dict[str, Any]) -> dict[str, float]:
+        """Page coordinates to a 0..1 fraction, so any zoom draws the same box."""
         width = 1.0 if self._normalised_boxes else entry["width"]
         height = 1.0 if self._normalised_boxes else entry["height"]
+        x = max(box["x"] / width, 0.0)
+        y = max(box["y"] / height, 0.0)
         return {
-            "x": round(max(box["x"] / width, 0.0), 5),
-            "y": round(max(box["y"] / height, 0.0), 5),
-            "w": round(min(box["w"] / width, 1.0), 5),
-            "h": round(min(box["h"] / height, 1.0), 5),
+            "x": round(x, 5),
+            "y": round(y, 5),
+            "w": round(min(box["w"] / width, 1.0 - x), 5),
+            "h": round(min(box["h"] / height, 1.0 - y), 5),
         }
 
     def anchor(self, evidence: Optional[str], value: Any = None,
@@ -175,6 +262,8 @@ class PageIndex:
                 if not found:
                     continue
                 start, end, score = found
+                if rank == 0:  # matched on the quote — put the box on the value
+                    start, end = self._narrow_to_value(entry, start, end, value)
                 rects = self._rects(entry, start, end)
                 if not rects:
                     continue
