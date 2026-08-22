@@ -189,10 +189,10 @@
             <div class="chips" id="result-chips"></div>
           </div>
 
-          <div class="vb-actions">
+          <div class="vb-actions" id="vb-actions">
             <button type="button" class="btn btn-quiet" id="copy-btn">Copy text</button>
             <div class="menu-wrap">
-              <button type="button" class="btn btn-primary" id="download-btn">
+              <button type="button" class="btn btn-quiet" id="download-btn">
                 Download
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
                   <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -205,10 +205,28 @@
                 <button type="button" data-dl="print"><b>Print or save as PDF</b><span>Opens your print dialog</span></button>
               </div>
             </div>
+            <button type="button" class="btn btn-primary" id="to-header">
+              Map to CRF
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                <path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
           </div>
         </div>
 
-        <div class="vb-row vb-tools">
+        <nav class="stepper" id="stepper" aria-label="Progress">
+          <button type="button" data-step="extract" class="active">
+            <b>1</b><span>Extracted text</span>
+          </button>
+          <button type="button" data-step="header" disabled>
+            <b>2</b><span>Confirm header</span>
+          </button>
+          <button type="button" data-step="form" disabled>
+            <b>3</b><span>Map to Cronos CRF</span>
+          </button>
+        </nav>
+
+        <div class="vb-row vb-tools" id="tools-extract">
           <div class="segmented" id="layout-toggle" role="group" aria-label="Layout">
             <button type="button" data-layout="split" class="active">Side by side</button>
             <button type="button" data-layout="extracted">Extracted only</button>
@@ -244,10 +262,15 @@
         <section class="pane pane-original" id="pane-original">
           <div class="pane-head">
             <span>Original document</span>
-            <small>As supplied</small>
+            <label class="region-toggle" id="region-toggle-wrap" hidden>
+              <input type="checkbox" id="region-toggle" checked />
+              <span class="region-swatch" aria-hidden="true"></span>
+              <span>Extracted regions</span>
+              <b id="region-count"></b>
+            </label>
           </div>
           <div class="pane-body">
-            <iframe id="original-frame" title="Original PDF"></iframe>
+            <div id="pdf-scroll" class="pdf-scroll"></div>
             <div class="pane-empty" id="original-empty">
               The original file is no longer loaded in this browser session.
             </div>
@@ -258,20 +281,92 @@
 
         <section class="pane pane-extracted" id="pane-extracted">
           <div class="pane-head">
-            <span>Extracted text</span>
+            <span id="extracted-heading">Extracted text</span>
             <small id="extracted-note">Review before use</small>
           </div>
           <div class="pane-body" id="extracted-scroll">
-            <div id="doc-formatted" class="doc-pages"></div>
-            <pre id="doc-markdown" class="doc-source hidden"></pre>
-            <pre id="doc-plain" class="doc-source hidden"></pre>
+            <div id="panel-extract" class="panel">
+              <div id="doc-formatted" class="doc-pages"></div>
+              <pre id="doc-markdown" class="doc-source hidden"></pre>
+              <pre id="doc-plain" class="doc-source hidden"></pre>
+            </div>
+
+            <!-- ------------------------------------------------ confirm header -->
+            <div id="panel-header" class="panel hidden">
+              <div class="panel-intro">
+                <p class="eyebrow">Step 2 of 3</p>
+                <h3>Check what we read from the header</h3>
+                <p>
+                  These identify the document. Correct anything that is wrong before the
+                  rest of the page is mapped &mdash; the values here are used to pick the
+                  right form and are carried into every record.
+                </p>
+              </div>
+              <div id="header-groups"></div>
+              <div class="panel-foot">
+                <button type="button" class="btn btn-quiet" data-goto="extract">Back</button>
+                <button type="button" class="btn btn-primary" id="header-confirm">
+                  Confirm and choose form
+                </button>
+              </div>
+            </div>
+
+            <!-- --------------------------------------------------- map to cronos -->
+            <div id="panel-form" class="panel hidden">
+              <div id="form-picker" class="picker">
+                <div class="panel-intro">
+                  <p class="eyebrow">Step 3 of 3</p>
+                  <h3>Choose the Cronos form to map into</h3>
+                  <p id="picker-note">Forms available for this protocol.</p>
+                </div>
+                <div id="form-list" class="form-list"></div>
+              </div>
+
+              <div id="form-body" class="hidden">
+                <div class="panel-intro">
+                  <p class="eyebrow" id="form-eyebrow">Cronos form</p>
+                  <h3 id="form-title"></h3>
+                  <p id="form-description"></p>
+                </div>
+                <div id="form-sections"></div>
+                <div class="panel-foot panel-foot-wide">
+                  <button type="button" class="btn btn-quiet" id="form-change">
+                    Change form
+                  </button>
+                  <div class="foot-spacer"></div>
+                  <button type="button" class="btn btn-quiet" id="dl-crf-json">
+                    Download JSON
+                  </button>
+                  <button type="button" class="btn btn-quiet" id="dl-crf-pdf">
+                    Download PDF
+                  </button>
+                  <button type="button" class="btn btn-primary" id="send-cronos">
+                    Send to Cronos
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div id="panel-busy" class="panel-busy hidden">
+              <span class="mini-spin" aria-hidden="true"></span>
+              <p id="panel-busy-text">Reading fields…</p>
+            </div>
           </div>
         </section>
       </div>
     </section>
 
+    <script type="module">
+      // pdf.js ships as an ES module; the rest of the app is classic script, so it
+      // is published on `window` and announced once the worker is configured.
+      import * as pdfjsLib from "/static/vendor/pdf.min.mjs";
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdf.worker.min.mjs";
+      window.pdfjsLib = pdfjsLib;
+      window.dispatchEvent(new Event("pdfjs-ready"));
+    </script>
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>
+    <script src="/static/pdfview.js"></script>
     <script src="/static/app.js"></script>
   </body>
 </html>

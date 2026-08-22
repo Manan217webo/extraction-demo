@@ -1,0 +1,114 @@
+{
+  "form_id": "CRF-SCR-002",
+  "form_name": "Screening Visit CRF",
+  "form_version": "2.1",
+  "form_description": "Screening assessments captured at Visit 1, prior to randomisation. Completed by the site coordinator and reviewed by the investigator.",
+  "visit": "Screening",
+  "protocols": ["*"],
+  "sections": [
+    {
+      "section_id": "DM",
+      "name": "Demographics & Eligibility",
+      "description": "Subject characteristics recorded at consent, and the investigator's eligibility determination.",
+      "fields": [
+        { "field_id": "DMCONSDT", "label": "Informed consent date", "type": "date" },
+        { "field_id": "DMCONSVER", "label": "Consent form version", "type": "text" },
+        { "field_id": "DMBRTHDT", "label": "Date of birth", "type": "date" },
+        { "field_id": "DMAGE", "label": "Age", "type": "number", "unit": "years", "min": 0, "max": 120 },
+        { "field_id": "DMSEX", "label": "Sex", "type": "select", "options": ["Male", "Female", "Other", "Not reported"] },
+        { "field_id": "DMRACE", "label": "Race", "type": "select", "options": ["White", "Black or African American", "Asian", "American Indian or Alaska Native", "Native Hawaiian or Other Pacific Islander", "Other", "Not reported"] },
+        { "field_id": "DMETHNIC", "label": "Ethnicity", "type": "select", "options": ["Hispanic or Latino", "Not Hispanic or Latino", "Not reported"] },
+        { "field_id": "DMCHILDBR", "label": "Childbearing potential", "type": "select", "options": ["Yes", "No", "Not applicable"] },
+        { "field_id": "IEINCALL", "label": "All inclusion criteria met", "type": "radio", "options": ["Yes", "No"] },
+        { "field_id": "IEEXCNONE", "label": "No exclusion criteria met", "type": "radio", "options": ["Yes", "No"] },
+        { "field_id": "IEELIG", "label": "Subject eligible for randomisation", "type": "radio", "options": ["Yes", "No"] },
+        { "field_id": "IEREASON", "label": "If not eligible, reason", "type": "textarea" }
+      ]
+    },
+    {
+      "section_id": "VS",
+      "name": "Vital Signs",
+      "description": "Vital signs measured after the subject has been seated and at rest for at least five minutes.",
+      "fields": [
+        { "field_id": "VSDAT", "label": "Assessment date", "type": "date" },
+        { "field_id": "VSPOS", "label": "Position", "type": "select", "options": ["Sitting", "Supine", "Standing"] },
+        { "field_id": "VSHEIGHT", "label": "Height", "type": "number", "unit": "cm", "min": 50, "max": 250 },
+        { "field_id": "VSWEIGHT", "label": "Weight", "type": "number", "unit": "kg", "min": 20, "max": 300 },
+        { "field_id": "VSBMI", "label": "BMI", "type": "number", "unit": "kg/m²", "min": 8, "max": 90, "derived": true }
+      ],
+      "group": {
+        "group_id": "VSTP",
+        "label": "Measurements by timepoint",
+        "row_label": "Timepoint",
+        "max_instances": 8,
+        "fields": [
+          { "field_id": "VSTPT", "label": "Timepoint", "type": "text" },
+          { "field_id": "VSTIM", "label": "Time", "type": "time" },
+          { "field_id": "VSSYSBP", "label": "Systolic BP", "type": "number", "unit": "mmHg", "min": 40, "max": 300 },
+          { "field_id": "VSDIABP", "label": "Diastolic BP", "type": "number", "unit": "mmHg", "min": 20, "max": 200 },
+          { "field_id": "VSPULSE", "label": "Pulse rate", "type": "number", "unit": "beats/min", "min": 20, "max": 250 },
+          { "field_id": "VSTEMP", "label": "Temperature", "type": "number", "unit": "°C", "min": 30, "max": 45 },
+          { "field_id": "VSRESP", "label": "Respiratory rate", "type": "number", "unit": "breaths/min", "min": 4, "max": 60 },
+          { "field_id": "VSSPO2", "label": "Oxygen saturation", "type": "number", "unit": "%", "min": 50, "max": 100 },
+          { "field_id": "VSCLSIG", "label": "Clinically significant", "type": "radio", "options": ["Yes", "No"] }
+        ]
+      }
+    },
+    {
+      "section_id": "PE",
+      "name": "Physical Examination",
+      "description": "Full physical examination by body system. Any abnormality judged clinically significant must also be recorded as medical history or an adverse event.",
+      "fields": [
+        { "field_id": "PEDAT", "label": "Examination date", "type": "date" },
+        { "field_id": "PETIM", "label": "Examination time", "type": "time" },
+        { "field_id": "PEALL", "label": "Overall examination", "type": "radio", "options": ["Normal", "Abnormal", "Not done"] },
+        { "field_id": "PEEXAMBY", "label": "Examined by", "type": "text" }
+      ],
+      "group": {
+        "group_id": "PEBODY",
+        "label": "Body systems",
+        "row_label": "Body system",
+        "max_instances": 14,
+        "fields": [
+          { "field_id": "PEBODSYS", "label": "Body system", "type": "text" },
+          { "field_id": "PERES", "label": "Result", "type": "radio", "options": ["Normal", "Abnormal", "Not done"] },
+          { "field_id": "PEFIND", "label": "Findings", "type": "textarea" },
+          { "field_id": "PECLSIG", "label": "Clinically significant", "type": "radio", "options": ["Yes", "No"] }
+        ]
+      }
+    },
+    {
+      "section_id": "EGLB",
+      "name": "ECG & Laboratory",
+      "description": "Twelve-lead ECG intervals and central laboratory results reviewed against the reference ranges supplied by the laboratory.",
+      "fields": [
+        { "field_id": "EGDAT", "label": "ECG date", "type": "date" },
+        { "field_id": "EGTIM", "label": "ECG time", "type": "time" },
+        { "field_id": "EGHR", "label": "Heart rate", "type": "number", "unit": "beats/min", "min": 20, "max": 250 },
+        { "field_id": "EGPR", "label": "PR interval", "type": "number", "unit": "ms", "min": 50, "max": 500 },
+        { "field_id": "EGQRS", "label": "QRS duration", "type": "number", "unit": "ms", "min": 40, "max": 300 },
+        { "field_id": "EGQT", "label": "QT interval", "type": "number", "unit": "ms", "min": 200, "max": 700 },
+        { "field_id": "EGQTCF", "label": "QTcF interval", "type": "number", "unit": "ms", "min": 200, "max": 700 },
+        { "field_id": "EGINTP", "label": "ECG interpretation", "type": "select", "options": ["Normal", "Abnormal, not clinically significant", "Abnormal, clinically significant", "Not done"] },
+        { "field_id": "LBDAT", "label": "Sample collection date", "type": "date" },
+        { "field_id": "LBFAST", "label": "Subject fasted", "type": "radio", "options": ["Yes", "No"] }
+      ],
+      "group": {
+        "group_id": "LBRES",
+        "label": "Laboratory results",
+        "row_label": "Test",
+        "max_instances": 40,
+        "fields": [
+          { "field_id": "LBCAT", "label": "Panel", "type": "select", "options": ["Haematology", "Biochemistry", "Urinalysis", "Coagulation", "Other"] },
+          { "field_id": "LBTEST", "label": "Test name", "type": "text" },
+          { "field_id": "LBORRES", "label": "Result", "type": "text" },
+          { "field_id": "LBORRESU", "label": "Unit", "type": "text" },
+          { "field_id": "LBORNRLO", "label": "Range low", "type": "text" },
+          { "field_id": "LBORNRHI", "label": "Range high", "type": "text" },
+          { "field_id": "LBNRIND", "label": "Flag", "type": "select", "options": ["Normal", "Low", "High", "Abnormal"] },
+          { "field_id": "LBCLSIG", "label": "Clinically significant", "type": "radio", "options": ["Yes", "No"] }
+        ]
+      }
+    }
+  ]
+}

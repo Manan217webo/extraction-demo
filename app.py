@@ -7,6 +7,7 @@ reach the browser is written in the product's own voice.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -25,10 +26,21 @@ from pydantic import BaseModel
 import llama_cloud
 from llama_cloud import AsyncLlamaCloud
 
+import anchors
+import cronos
+import fields
+import mapping
 from docx_export import build_docx
+from pdf_export import build_crf_pdf
 
 load_dotenv()
 
+# Without this the diagnostics below sit at INFO and never reach the console,
+# which is exactly when they are wanted. LOG_LEVEL=DEBUG for more.
+logging.basicConfig(
+    level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
+    format="%(levelname)s:     %(name)s: %(message)s",
+)
 log = logging.getLogger("extraction")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -252,10 +264,16 @@ def _count_pages(data: bytes) -> Optional[int]:
         return None
 
 
-def _expand_for(tier: str) -> list[str]:
+def _expand_for(tier: str, with_items: bool = False) -> list[str]:
     expand = ["text_full", "text", "usage"]
     if tier != "fast":
         expand.extend(["markdown_full", "markdown"])
+        # `items` carries the per-page layout with bounding boxes, which is what
+        # lets a mapped value be drawn back onto the original page. It is far
+        # larger than the text and is needed exactly once, so it is never part of
+        # a status poll — only of the single fetch the mapping stage makes.
+        if with_items:
+            expand.append("items")
     return expand
 
 
@@ -292,6 +310,19 @@ def _pages_from(container: Any, field: str) -> list[dict[str, Any]]:
                 "content": content,
             }
         )
+    return out
+
+
+def _layout_pages(result: Any) -> list[dict[str, Any]]:
+    """Plain-dict view of the parser's layout items, bounding boxes included."""
+    container = getattr(result, "items", None)
+    out: list[dict[str, Any]] = []
+    for page in getattr(container, "pages", None) or []:
+        dump = getattr(page, "model_dump", None)
+        try:
+            out.append(dump(mode="json") if dump else dict(page))
+        except Exception as exc:  # a page we cannot read simply cannot be anchored
+            log.warning("layout page skipped: %s", exc)
     return out
 
 
@@ -335,11 +366,18 @@ async def index() -> FileResponse:
 @app.get("/api/session")
 async def session() -> dict[str, Any]:
     """Everything the page needs on load: readiness, modes and the credit balance."""
+    connector = cronos.get_connector()
     return {
         "ready": _api_key_configured(),
         "modes": MODES,
         "credits": await _credits(),
         "max_file_mb": MAX_BYTES // (1024 * 1024),
+        "mapping": {
+            "ready": fields.configured(),
+            "model": fields.model_name() if fields.configured() else None,
+            "cronos": {"connector": connector.name,
+                       "live": getattr(connector, "live", False)},
+        },
     }
 
 
@@ -397,7 +435,9 @@ async def create_extraction(
 
 @app.get("/api/documents/{job_id}")
 async def extraction_status(job_id: str) -> dict[str, Any]:
-    meta = _jobs.get(job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None})
+    meta = _jobs.setdefault(
+        job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None}
+    )
     tier = meta.get("tier") or TIER_FOR_MODE[DEFAULT_MODE]
     client = get_client()
 
@@ -447,6 +487,245 @@ async def export_word(payload: WordExport) -> Response:
             )
         },
     )
+
+
+
+# ----------------------------------------------------------------- field mapping
+
+
+def _document_meta(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "filename": meta.get("filename"),
+        "page_count": meta.get("pages"),
+        "mode": meta.get("mode"),
+    }
+
+
+async def _parse_artifacts(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Text and page layout for a finished job, fetched once and kept.
+
+    This is the only place the layout items are pulled, because they dwarf the
+    text and are needed only when a document is being mapped onto a form.
+    """
+    meta = _jobs.setdefault(
+        job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None}
+    )
+    if meta.get("parse"):
+        return meta, meta["parse"]
+
+    tier = meta.get("tier") or TIER_FOR_MODE[DEFAULT_MODE]
+    client = get_client()
+    try:
+        result = await client.parsing.get(
+            job_id=job_id, expand=_expand_for(tier, with_items=True)
+        )
+    except llama_cloud.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="That extraction could not be found.") from exc
+    except Exception as exc:
+        raise _friendly(exc) from exc
+
+    if _job_status(result) != "COMPLETED":
+        raise HTTPException(
+            status_code=409,
+            detail="That document hasn't finished extracting yet. Please try again.",
+        )
+
+    payload = _serialize(result, meta)
+    meta["parse"] = {
+        "markdown": payload["markdown"],
+        "pages": payload["pages"],
+        "items": _layout_pages(result),
+    }
+    log.info(
+        "cached parse for %s: %s page(s), %s layout page(s)",
+        job_id, len(meta["parse"]["pages"]), len(meta["parse"]["items"]),
+    )
+    return meta, meta["parse"]
+
+
+@app.post("/api/documents/{job_id}/header")
+async def read_header(job_id: str) -> dict[str, Any]:
+    """Step one: what we believe the document's header block says."""
+    meta, parse = await _parse_artifacts(job_id)
+    document = fields.document_for_model(parse.get("pages") or [], parse.get("markdown") or "")
+
+    try:
+        result = await fields.extract_header(document)
+    except fields.ExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    index = anchors.PageIndex(parse.get("items") or [])
+    header = mapping.build_header(result["values"], index)
+    meta["header_rows"] = result["values"]
+
+    return {
+        "document": _document_meta(job_id, meta),
+        "header": header,
+        "highlights": mapping.highlights(header),
+        "summary": header["summary"],
+        "anchoring": bool(index),
+        "truncated": fields.was_truncated(document),
+        "usage": result.get("usage", {}),
+    }
+
+
+@app.get("/api/cronos/forms")
+async def cronos_forms(protocol_no: Optional[str] = None) -> dict[str, Any]:
+    connector = cronos.get_connector()
+    try:
+        forms = await connector.list_forms(protocol_no)
+    except cronos.CronosUnavailable as exc:
+        raise HTTPException(
+            status_code=502, detail="We couldn't reach Cronos. Please try again."
+        ) from exc
+    return {"connector": connector.name, "live": getattr(connector, "live", False),
+            "protocol_no": protocol_no, "forms": forms}
+
+
+@app.get("/api/cronos/forms/{form_id}")
+async def cronos_form(form_id: str) -> dict[str, Any]:
+    try:
+        form = await cronos.get_connector().get_form(form_id)
+    except cronos.CronosUnavailable as exc:
+        raise HTTPException(
+            status_code=502, detail="We couldn't reach Cronos. Please try again."
+        ) from exc
+    if not form:
+        raise HTTPException(status_code=404, detail="That form could not be found in Cronos.")
+    return form
+
+
+class MapRequest(BaseModel):
+    form_id: str
+    header: dict[str, Any] = {}
+
+
+def _apply_header_edits(header: dict[str, Any], confirmed: dict[str, Any]) -> None:
+    """Overlay the reviewer's confirmed header onto what was extracted."""
+    for group in header.get("groups") or []:
+        for field in group.get("fields") or []:
+            if field["field_id"] not in confirmed:
+                continue
+            value = confirmed[field["field_id"]]
+            value = value.strip() if isinstance(value, str) else value
+            value = None if value in ("", None) else value
+            if str(value) == str(field.get("value")):
+                continue
+            field["value"] = value
+            field["status"] = "manual" if field.get("value") is None else "edited"
+
+
+@app.post("/api/documents/{job_id}/map")
+async def map_to_form(job_id: str, request: MapRequest) -> dict[str, Any]:
+    """Step two: read the document against the chosen Cronos form."""
+    meta, parse = await _parse_artifacts(job_id)
+
+    try:
+        form = await cronos.get_connector().get_form(request.form_id)
+    except cronos.CronosUnavailable as exc:
+        raise HTTPException(
+            status_code=502, detail="We couldn't reach Cronos. Please try again."
+        ) from exc
+    if not form:
+        raise HTTPException(status_code=404, detail="That form could not be found in Cronos.")
+
+    document = fields.document_for_model(parse.get("pages") or [], parse.get("markdown") or "")
+    index = anchors.PageIndex(parse.get("items") or [])
+
+    header = mapping.build_header(meta.get("header_rows") or [], index)
+    _apply_header_edits(header, request.header)
+    confirmed = mapping.header_values(header["groups"])
+
+    try:
+        result = await fields.extract_form(document, form, confirmed)
+    except fields.ExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    payload = {
+        "document": _document_meta(job_id, meta),
+        "header": header,
+        "form": mapping.build_form(form, result["values"], index),
+    }
+    mapping.revalidate(payload)
+    payload["anchoring"] = bool(index)
+    payload["truncated"] = fields.was_truncated(document)
+    payload["dropped"] = result.get("dropped", 0)
+    payload["usage"] = result.get("usage", {})
+    return payload
+
+
+class CrfExport(BaseModel):
+    payload: dict[str, Any]
+    filename: str = "case-report-form"
+
+
+def _export_stem(name: str, payload: dict[str, Any]) -> str:
+    header = {
+        field["field_id"]: field.get("value")
+        for group in (payload.get("header") or {}).get("groups") or []
+        for field in group.get("fields") or []
+    }
+    parts = [header.get("protocol_no"), header.get("subject_no"), header.get("visit_name")]
+    stem = " ".join(str(part) for part in parts if part) or Path(name or "crf").stem
+    stem = re.sub(r"[\\/:*?\"<>|]+", "", stem).strip()
+    return stem or "case-report-form"
+
+
+@app.post("/api/exports/crf-pdf")
+async def export_crf_pdf(request: CrfExport) -> Response:
+    payload = mapping.revalidate(request.payload)
+    stem = _export_stem(request.filename, payload)
+    try:
+        data = build_crf_pdf(payload)
+    except Exception as exc:
+        log.exception("crf pdf export failed", exc_info=exc)
+        raise HTTPException(status_code=500, detail="We couldn't build the PDF.") from exc
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{stem}.pdf"; '
+                f"filename*=UTF-8''{quote(stem)}.pdf"
+            )
+        },
+    )
+
+
+@app.post("/api/exports/crf-json")
+async def export_crf_json(request: CrfExport) -> Response:
+    payload = mapping.revalidate(request.payload)
+    stem = _export_stem(request.filename, payload)
+    data = json.dumps(mapping.for_export(payload), indent=2, ensure_ascii=False)
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{stem}.json"; '
+                f"filename*=UTF-8''{quote(stem)}.json"
+            )
+        },
+    )
+
+
+class Submission(BaseModel):
+    form_id: str
+    payload: dict[str, Any]
+
+
+@app.post("/api/cronos/submissions")
+async def submit_to_cronos(request: Submission) -> dict[str, Any]:
+    payload = mapping.revalidate(request.payload)
+    try:
+        return await cronos.get_connector().submit(
+            request.form_id, mapping.for_export(payload)
+        )
+    except cronos.CronosUnavailable as exc:
+        raise HTTPException(
+            status_code=502, detail="Cronos didn't accept the submission. Please try again."
+        ) from exc
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -1,0 +1,57 @@
+{
+  "form_id": "CRF-FUP-001",
+  "form_name": "Follow-up Visit CRF",
+  "form_version": "1.4",
+  "form_description": "Abbreviated assessments captured at scheduled follow-up visits after randomisation. Demographics and eligibility are not repeated.",
+  "visit": "Follow-up",
+  "protocols": ["*"],
+  "sections": [
+    {
+      "section_id": "VS",
+      "name": "Vital Signs",
+      "description": "Vital signs measured after the subject has been seated and at rest for at least five minutes.",
+      "fields": [
+        { "field_id": "VSDAT", "label": "Assessment date", "type": "date" },
+        { "field_id": "VSPOS", "label": "Position", "type": "select", "options": ["Sitting", "Supine", "Standing"] },
+        { "field_id": "VSWEIGHT", "label": "Weight", "type": "number", "unit": "kg", "min": 20, "max": 300 }
+      ],
+      "group": {
+        "group_id": "VSTP",
+        "label": "Measurements by timepoint",
+        "row_label": "Timepoint",
+        "max_instances": 8,
+        "fields": [
+          { "field_id": "VSTPT", "label": "Timepoint", "type": "text" },
+          { "field_id": "VSTIM", "label": "Time", "type": "time" },
+          { "field_id": "VSSYSBP", "label": "Systolic BP", "type": "number", "unit": "mmHg", "min": 40, "max": 300 },
+          { "field_id": "VSDIABP", "label": "Diastolic BP", "type": "number", "unit": "mmHg", "min": 20, "max": 200 },
+          { "field_id": "VSPULSE", "label": "Pulse rate", "type": "number", "unit": "beats/min", "min": 20, "max": 250 },
+          { "field_id": "VSTEMP", "label": "Temperature", "type": "number", "unit": "°C", "min": 30, "max": 45 },
+          { "field_id": "VSCLSIG", "label": "Clinically significant", "type": "radio", "options": ["Yes", "No"] }
+        ]
+      }
+    },
+    {
+      "section_id": "PE",
+      "name": "Physical Examination",
+      "description": "Targeted physical examination. Only systems examined at this visit need to be recorded.",
+      "fields": [
+        { "field_id": "PEDAT", "label": "Examination date", "type": "date" },
+        { "field_id": "PEALL", "label": "Overall examination", "type": "radio", "options": ["Normal", "Abnormal", "Not done"] },
+        { "field_id": "PEEXAMBY", "label": "Examined by", "type": "text" }
+      ],
+      "group": {
+        "group_id": "PEBODY",
+        "label": "Body systems",
+        "row_label": "Body system",
+        "max_instances": 14,
+        "fields": [
+          { "field_id": "PEBODSYS", "label": "Body system", "type": "text" },
+          { "field_id": "PERES", "label": "Result", "type": "radio", "options": ["Normal", "Abnormal", "Not done"] },
+          { "field_id": "PEFIND", "label": "Findings", "type": "textarea" },
+          { "field_id": "PECLSIG", "label": "Clinically significant", "type": "radio", "options": ["Yes", "No"] }
+        ]
+      }
+    }
+  ]
+}
