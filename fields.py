@@ -84,8 +84,15 @@ VALUE_PROPERTIES = {
     },
     "evidence": {
         "type": ["string", "null"],
-        "description": "Verbatim text copied from the page that this value was read from, "
-                       "including the label where they sit together. Null if not found.",
+        "description": "What you read, in your own words if the value is a tick or a "
+                       "mark rather than text. Null if the field is blank.",
+    },
+    "locator": {
+        "type": ["string", "null"],
+        "description": "The printed label or row heading that sits next to this value, "
+                       "copied EXACTLY as it is printed on the page — for a table, the "
+                       "row heading. This must be text that really appears on the page; "
+                       "it is used to find the value's position. Null if there is none.",
     },
     "page": {"type": ["integer", "null"], "description": "Page number the value was read from."},
     "confidence": {
@@ -151,9 +158,23 @@ Rules:
 - Only report a value you can actually see on the page. Never infer, calculate or
   carry a value over from another field. If a field is blank, struck through or you
   cannot read it, return null.
-- `evidence` must be copied verbatim from the page, never paraphrased. Include the
-  printed label next to the value when they appear together, so the value can be
-  located on the page.
+- Tick boxes reach you as markers, in two notations:
+      [x]  or [yes]   the box IS ticked
+      [ ]  or [no]    the box is EMPTY
+  `[no]` means an empty box. It does NOT mean the answer "No".
+  So `[x] Normal [ ] Abnormal` is "Normal", and `[ ] Yes [x] No` is "No", but
+  `[ ] CS [ ] NCS` and `[no] ... [no]` are nothing at all — neither option was
+  marked, the field was not recorded, and you must return null.
+- An empty tick box is never an answer. Never turn "nothing was ticked" into "No",
+  "Not done" or any other value. Report only the option that is actually marked.
+- `locator` must be text that is genuinely printed on the page, copied character for
+  character — normally the row heading or the field label immediately beside the
+  value ("Lymph Nodes", "Pulse rate", "Protocol No."). Never put a description or a
+  sentence here, and never invent one. It is what places the value on the page.
+- `evidence` may describe what you saw when the value is a tick or a handwritten
+  mark rather than printed text. When a value comes from a tick box, `evidence`
+  MUST contain the marker exactly as it appears in the text, e.g. "[x] Normal" or
+  "[ ] CS [ ] NCS", so the tick can be checked.
 - Dates: return ISO 8601 `YYYY-MM-DD`. If the source is ambiguous (e.g. 03/04/2025)
   keep the value but drop confidence below 0.6.
 - Times: return 24-hour `HH:MM`.
@@ -388,6 +409,7 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     elif value is not None:
         value = str(value)
     evidence = (row.get("evidence") or "").strip() or None
+    locator = (row.get("locator") or "").strip() or None
     try:
         confidence = float(row.get("confidence"))
     except (TypeError, ValueError):
@@ -397,6 +419,7 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
         "field_id": field_id,
         "value": value,
         "evidence": evidence,
+        "locator": locator,
         "page": int(page) if isinstance(page, (int, float)) and page else None,
         "confidence": max(0.0, min(1.0, confidence)),
     }

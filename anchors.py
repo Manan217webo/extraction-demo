@@ -51,6 +51,30 @@ def _item_text(item: dict[str, Any]) -> str:
     return ""
 
 
+def _extent(boxes: list[dict[str, Any]], width: float,
+            height: float) -> Optional[dict[str, float]]:
+    """The region an item really occupies: the union of its boxes.
+
+    A merged form-table is given one box covering only part of itself plus loose
+    boxes for the rest, so the first box alone badly understates the block and any
+    row worked out from it lands far too high. Page-sized wrappers are ignored,
+    since they describe the sheet rather than the item.
+    """
+    usable = [
+        box for box in boxes
+        if all(isinstance(box.get(k), (int, float)) for k in ("x", "y", "w", "h"))
+        and box["w"] > 0 and box["h"] > 0
+        and not (box["h"] >= 0.75 * height and box["w"] >= 0.75 * width)
+    ]
+    if not usable:
+        return None
+    x0 = min(b["x"] for b in usable)
+    y0 = min(b["y"] for b in usable)
+    x1 = max(b["x"] + b["w"] for b in usable)
+    y1 = max(b["y"] + b["h"] for b in usable)
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
 def _boxes_are_normalised(pages: list[dict[str, Any]]) -> bool:
     """Guard against a parser build that already returns 0..1 coordinates."""
     for page in pages:
@@ -81,6 +105,7 @@ class PageIndex:
                 norm, index = _normalise(text)
                 if not norm.strip():
                     continue
+                boxes = item.get("bbox") or []
                 self._entries.append({
                     "page": number,
                     "width": width,
@@ -88,8 +113,9 @@ class PageIndex:
                     "raw": text,
                     "norm": norm,
                     "map": index,
-                    "bbox": item.get("bbox") or [],
+                    "bbox": boxes,
                     "type": item.get("type"),
+                    "extent": _extent(boxes, width, height),
                 })
 
     def __bool__(self) -> bool:
@@ -156,7 +182,8 @@ class PageIndex:
 
     def _rects(self, entry: dict[str, Any], start: int, end: int) -> list[dict[str, float]]:
         """Boxes covering [start, end), narrowed to the line or cell where possible."""
-        boxes = [box for box in entry["bbox"] if self._usable(box)]
+        boxes = [box for box in entry["bbox"]
+                 if self._usable(box) and not self._is_page_sized(entry, box)]
         ranged = [
             box for box in boxes
             if box.get("start_index") is not None and box.get("end_index") is not None
@@ -217,11 +244,14 @@ class PageIndex:
             return [self._scale(entry, box)]
 
         position = rows.index(line_index)
+        # The row is worked out against the item's full extent; the box that
+        # happened to match may cover only part of it.
+        frame = entry.get("extent") or box
         scaled = self._scale(entry, {
-            "x": box["x"],
-            "y": box["y"] + box["h"] * position / len(rows),
-            "w": box["w"],
-            "h": box["h"] / len(rows),
+            "x": frame["x"],
+            "y": frame["y"] + frame["h"] * position / len(rows),
+            "w": frame["w"],
+            "h": frame["h"] / len(rows),
         })
         scaled["approximate"] = True
         return [scaled]
@@ -230,6 +260,11 @@ class PageIndex:
     def _usable(box: dict[str, Any]) -> bool:
         return all(isinstance(box.get(k), (int, float)) for k in ("x", "y", "w", "h")) \
             and box["w"] > 0 and box["h"] > 0
+
+    def _is_page_sized(self, entry: dict[str, Any], box: dict[str, Any]) -> bool:
+        """A wrapper around the whole sheet locates nothing and must not be drawn."""
+        return (box["h"] >= 0.75 * entry["height"]
+                and box["w"] >= 0.75 * entry["width"])
 
     def _scale(self, entry: dict[str, Any], box: dict[str, Any]) -> dict[str, float]:
         """Page coordinates to a 0..1 fraction, so any zoom draws the same box."""
@@ -245,9 +280,19 @@ class PageIndex:
         }
 
     def anchor(self, evidence: Optional[str], value: Any = None,
-               page_hint: Optional[int] = None) -> Optional[dict[str, Any]]:
-        """Best rectangle for the quoted evidence, falling back to the value itself."""
-        candidates = [text for text in (evidence, None if value is None else str(value)) if text]
+               page_hint: Optional[int] = None,
+               locator: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """Best rectangle for a value, preferring the printed label beside it.
+
+        On a tick-box form the reader cannot quote a tick, so its `evidence` turns
+        into prose like "Lymph Nodes row shows Normal checked", which matches
+        nothing verbatim and fuzzy-matches onto the wrong row. The `locator` — the
+        row or field label as printed — is real text on the page and is tried first.
+        """
+        candidates = [
+            text for text in (locator, evidence, None if value is None else str(value))
+            if text
+        ]
         if not candidates or not self._entries:
             return None
 

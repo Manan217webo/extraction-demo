@@ -1,0 +1,53 @@
+{
+  "form_id": "CRF-VSPE-001",
+  "form_name": "Visit Source CRF — Vitals & Physical Examination",
+  "form_version": "1.0",
+  "form_description": "Mirrors the printed visit source worksheet: an assessment-performed gate and date per section, vital signs one row per parameter, and physical examination one row per body system, each with the clinical-significance classification used on the page.",
+  "visit": "Any",
+  "protocols": ["*"],
+  "sections": [
+    {
+      "section_id": "VS",
+      "name": "Vital Signs",
+      "description": "Recorded once per parameter, with the investigator's clinical evaluation and, where abnormal, the clinical-significance classification.",
+      "fields": [
+        { "field_id": "VSPERF", "label": "Was Vital Signs assessment performed?", "type": "radio", "options": ["Yes", "No"] },
+        { "field_id": "VSDAT", "label": "Date of assessment", "type": "date" }
+      ],
+      "group": {
+        "group_id": "VSPARAM",
+        "label": "Parameters",
+        "row_label": "Parameter",
+        "max_instances": 12,
+        "fields": [
+          { "field_id": "VSPARM", "label": "Parameter", "type": "text" },
+          { "field_id": "VSORRES", "label": "Result", "type": "text" },
+          { "field_id": "VSORRESU", "label": "Unit", "type": "text" },
+          { "field_id": "VSEVAL", "label": "Clinical evaluation", "type": "radio", "options": ["Normal", "Abnormal"] },
+          { "field_id": "VSSIG", "label": "If abnormal, clinical significance", "type": "radio", "options": ["CS", "NCS"] }
+        ]
+      }
+    },
+    {
+      "section_id": "PE",
+      "name": "Physical Examination",
+      "description": "One row per body system or part examined, as laid out on the source worksheet.",
+      "fields": [
+        { "field_id": "PEPERF", "label": "Was Physical Examination performed?", "type": "radio", "options": ["Yes", "No"] },
+        { "field_id": "PEDAT", "label": "Date of Examination", "type": "date" }
+      ],
+      "group": {
+        "group_id": "PEBODY",
+        "label": "Systems examined",
+        "row_label": "System",
+        "max_instances": 16,
+        "fields": [
+          { "field_id": "PEBODSYS", "label": "System/Part Examined", "type": "text" },
+          { "field_id": "PECOND", "label": "Condition", "type": "radio", "options": ["Normal", "Abnormal"] },
+          { "field_id": "PESIG", "label": "If abnormal, clinical significance", "type": "radio", "options": ["CS", "NCS"] },
+          { "field_id": "PEABNORM", "label": "If clinically significant, describe abnormality", "type": "textarea" }
+        ]
+      }
+    }
+  ]
+}

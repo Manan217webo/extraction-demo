@@ -17,6 +17,10 @@ import cronos
 
 LOW_CONFIDENCE = 0.6
 
+# How the parser writes tick boxes. `[no]` is an EMPTY box, not the answer "No".
+_TICKED = re.compile(r"\[\s*(?:x|X|yes)\s*\]")
+_UNTICKED = re.compile(r"\[\s*(?:|no)\s*\]")
+
 DATE_FORMATS = [
     "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y",
     "%b %d, %Y", "%B %d, %Y", "%d.%m.%Y", "%Y/%m/%d", "%d-%b-%Y", "%d %b %y",
@@ -82,17 +86,36 @@ def _coerce(value: Any, field: dict[str, Any]) -> tuple[Any, list[str]]:
 # --------------------------------------------------------------------------- field build
 
 
+def _unticked_only(evidence: Optional[str]) -> bool:
+    """True when the quoted evidence shows tick boxes and none of them is ticked.
+
+    Readers reliably turn "[ ] CS [ ] NCS" into "No" — inventing an answer out of
+    an empty pair of boxes. On a CRF that is a fabricated observation, so it is
+    rejected here rather than trusted to the prompt.
+    """
+    if not evidence:
+        return False
+    return bool(_UNTICKED.search(evidence)) and not _TICKED.search(evidence)
+
+
 def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
                  index: Optional[anchors.PageIndex], key: str) -> dict[str, Any]:
     raw = (row or {}).get("value")
+    if (field.get("type") in {"select", "radio"}
+            and _unticked_only((row or {}).get("evidence"))):
+        raw = None
     value, issues = _coerce(raw, field)
+    if raw is None and (row or {}).get("value") is not None:
+        issues.append("no_option_ticked")
     confidence = (row or {}).get("confidence")
 
     source: dict[str, Any] = {"evidence": (row or {}).get("evidence"),
+                              "locator": (row or {}).get("locator"),
                               "page": (row or {}).get("page"),
                               "anchored": False, "rects": [], "match": "none"}
     if row and value is not None and index:
-        found = index.anchor(row.get("evidence"), raw, row.get("page"))
+        found = index.anchor(row.get("evidence"), raw, row.get("page"),
+                             locator=row.get("locator"))
         if found:
             source.update(
                 anchored=True,
