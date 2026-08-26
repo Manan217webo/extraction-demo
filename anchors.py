@@ -408,9 +408,24 @@ class PageIndex:
             "h": round(min(box["h"] / height, 1.0 - y), 5),
         }
 
+    def _in_region(self, entry: dict[str, Any], rects: list[dict[str, float]],
+                   region: Optional[list[tuple[int, float, float]]]) -> bool:
+        """Whether a match sits inside the block its section owns."""
+        if not region:
+            return True
+        for number, top, bottom in region:
+            if number != entry["page"]:
+                continue
+            for rect in rects:
+                middle = (rect["y"] + rect["h"] / 2) * entry["height"]
+                if top <= middle <= bottom:
+                    return True
+        return False
+
     def anchor(self, evidence: Optional[str], value: Any = None,
                page_hint: Optional[int] = None,
-               locator: Optional[str] = None) -> Optional[dict[str, Any]]:
+               locator: Optional[str] = None,
+               region: Optional[list[tuple[int, float, float]]] = None) -> Optional[dict[str, Any]]:
         """Best rectangle for a value, preferring the printed label beside it.
 
         On a tick-box form the reader cannot quote a tick, so its `evidence` turns
@@ -447,6 +462,10 @@ class PageIndex:
                     if merged:
                         rects = [merged]
                 if not rects:
+                    continue
+                # A value belonging to this CRF cannot have been read from another
+                # one further down the sheet.
+                if not self._in_region(entry, rects, region):
                     continue
                 # Prefer the quoted evidence over the bare value, an exact hit over a
                 # partial one, and the page the extractor said it read. Between two

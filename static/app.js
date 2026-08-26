@@ -944,7 +944,7 @@ function setStep(step) {
   els.extractedNote.textContent =
     step === "extract" ? "Always check against the original"
       : step === "header" ? "Confirm these match the page"
-        : "Red boxes show what was used";
+        : "Pink boxes were used · purple is the field you have selected";
 
   refreshHighlights();
 
