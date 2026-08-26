@@ -239,10 +239,25 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
             lines.extend(describe(f) for f in section["fields"])
         group = section.get("group")
         if group:
+            if group.get("positional_rows"):
+                # The EDC stores these rows by position and gives them no labels,
+                # so an instance number is the printed row, not a running count.
+                # Skipping a row must leave a hole rather than shift the rest up.
+                counting = (
+                    f"one instance per {group['row_label'].lower()} row printed on "
+                    f"the page, numbered by its position in that table — row 1 is "
+                    f"instance 1, row 2 is instance 2, and so on for all "
+                    f"{group['max_instances']} rows. If a row is blank, leave that "
+                    f"instance out entirely; never renumber the rows that follow it"
+                )
+            else:
+                counting = (
+                    f"one instance per {group['row_label'].lower()} actually "
+                    f"recorded, numbered from 1, up to {group['max_instances']}"
+                )
             lines.append(
-                f"    Repeating group {group['label']} — one instance per "
-                f"{group['row_label'].lower()} actually recorded, numbered from 1, "
-                f"up to {group['max_instances']}. Address every field below as "
+                f"    Repeating group {group['label']} — {counting}. "
+                f"Address every field below as "
                 f"section_id \"{section['section_id']}\", group_id "
                 f"\"{group['group_id']}\", instance 1, 2, 3 … "
                 f"(section_id stays \"{section['section_id']}\" — it is never "
@@ -295,8 +310,14 @@ def _unsupported(detail: str, *needles: str) -> bool:
     return any(needle in lowered for needle in needles)
 
 
-async def _complete(messages: list[dict[str, str]], schema: dict[str, Any],
-                    schema_name: str) -> dict[str, Any]:
+async def complete(messages: list[Any], schema: dict[str, Any], schema_name: str,
+                   model: Optional[str] = None) -> dict[str, Any]:
+    """A structured completion against any model on the configured account."""
+    return await _complete(messages, schema, schema_name, model=model)
+
+
+async def _complete(messages: list[Any], schema: dict[str, Any],
+                    schema_name: str, model: Optional[str] = None) -> dict[str, Any]:
     """One completion, degrading gracefully across model families."""
     if not configured():
         raise ExtractionUnavailable(
@@ -304,7 +325,7 @@ async def _complete(messages: list[dict[str, str]], schema: dict[str, Any],
         )
 
     payload: dict[str, Any] = {
-        "model": model_name(),
+        "model": model or model_name(),
         "messages": messages,
         "temperature": 0,
         "response_format": {

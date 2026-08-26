@@ -218,6 +218,10 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
             for number, instance in enumerate(kept, start=1):
                 built_instances.append({
                     "instance": number,
+                    # The number the model reported, before unfilled rows were
+                    # dropped. A positional store writes rows back by this, so
+                    # renumbering for display must not lose it.
+                    "source_instance": instance,
                     "fields": [
                         _build_field(
                             field,
@@ -232,6 +236,7 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
                 "group_id": group_id,
                 "label": group["label"],
                 "row_label": group["row_label"],
+                "row_names": group.get("row_names") or [],
                 "max_instances": group.get("max_instances"),
                 "field_definitions": group.get("fields") or [],
                 "instances": built_instances,
@@ -289,6 +294,9 @@ def highlights(*containers: dict[str, Any]) -> list[dict[str, Any]]:
                 "group": path["group"],
                 "instance": path["instance"],
                 "value": field["value"],
+                "raw": field.get("raw_value"),
+                "locator": source.get("locator"),
+                "evidence": source.get("evidence"),
                 "confidence": field.get("confidence"),
                 "match": source.get("match"),
                 "page": source.get("page"),

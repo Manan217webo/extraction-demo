@@ -531,6 +531,8 @@ button, input, select { font: inherit; color: inherit; }
 /* ------------------------------------------------------------------- viewer */
 
 body.viewing { overflow: hidden; }
+body.booting .workspace,
+body.booting .processing { visibility: hidden; }
 
 .viewer {
   position: fixed;
@@ -654,7 +656,14 @@ body.viewing { overflow: hidden; }
 
 /* panes -------------------------------------------------------------------- */
 
-.viewer-stage { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1px 1fr; }
+/* The split is a CSS variable so dragging the divider is one property write.
+   Both panes keep a minimum so neither can be collapsed to nothing. */
+.viewer-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, var(--split, 1fr)) 9px minmax(0, 1fr);
+}
 .viewer-stage[data-layout="extracted"] { grid-template-columns: 1fr; }
 .viewer-stage[data-layout="extracted"] .pane-original,
 .viewer-stage[data-layout="extracted"] .pane-split { display: none; }
@@ -662,7 +671,34 @@ body.viewing { overflow: hidden; }
 .viewer-stage[data-layout="original"] .pane-extracted,
 .viewer-stage[data-layout="original"] .pane-split { display: none; }
 
-.pane-split { background: var(--line); }
+/* A wide enough target to grab, with a hairline drawn down the middle of it. */
+.pane-split {
+  position: relative;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+.pane-split::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: var(--line);
+  transition: background 120ms ease, width 120ms ease, left 120ms ease;
+}
+.pane-split:hover::after,
+.pane-split:focus-visible::after,
+.pane-split.is-dragging::after {
+  background: var(--purple);
+  width: 3px;
+  left: 3px;
+}
+.pane-split:focus-visible { outline: none; }
+/* Held on the body so the cursor survives the pointer leaving the divider. */
+body.is-resizing,
+body.is-resizing * { cursor: col-resize !important; user-select: none; }
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .pane-head {
   flex: none;
@@ -1212,7 +1248,12 @@ mark.current { background: var(--purple); color: #fff; }
   border: 1px solid #f3e2bc;
   background: #fdf6e8;
   color: #7a5a12;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
+.notice-inline p { margin: 0; flex: 1; }
+.notice-inline .notice-action { flex-shrink: 0; }
 .notice-inline.info { border-color: #cfd9f8; background: #eff3fe; color: #2f4a95; }
 
 @media (max-width: 900px) {
@@ -1275,3 +1316,71 @@ mark.current { background: var(--purple); color: #fff; }
   .sheet-num { display: none; }
   mark { background: none; color: inherit; }
 }
+
+/* ------------------------------------------------- CRF tables & EDC visits */
+
+/* A repeating group that came off a printed table reads as one here too: one
+   row per instance, the group's row label down the left. */
+.crf-table-scroll { overflow-x: auto; }
+.crf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.crf-table th,
+.crf-table td {
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line);
+  padding: 0;
+  text-align: left;
+  vertical-align: top;
+}
+.crf-table th:last-child,
+.crf-table td:last-child { border-right: 0; }
+.crf-table thead th {
+  padding: 9px 12px;
+  background: #f6f3ff;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--purple-deep);
+  white-space: nowrap;
+}
+.crf-table thead th .unit {
+  display: block;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.crf-table .row-head {
+  padding: 10px 12px;
+  background: #faf9fd;
+  font-weight: 700;
+  color: var(--ink-2);
+  white-space: nowrap;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+/* A column this row has no cell for — body temperature carries a unit, the
+   other parameters do not. */
+.crf-table td.is-absent { background: repeating-linear-gradient(
+  135deg, transparent, transparent 5px, #f4f2fa 5px, #f4f2fa 10px); }
+
+/* In a table the column heading is the label, so the cell is the control alone. */
+.field.is-compact { display: block; padding: 6px 8px; }
+.field.is-compact .field-input { width: 100%; }
+.field.is-compact .field-meta { margin-top: 4px; }
+.field.is-compact .evidence { display: none; }
+
+.visit-crfs { display: grid; gap: 10px; padding: 16px 18px; }
+.visit-crf {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 8px;
+}
+.visit-crf strong { font-size: 13px; color: var(--ink); }

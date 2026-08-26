@@ -270,6 +270,87 @@
       });
     }
 
+    /* Each page as an image, for anything that needs to look at the whole sheet.
+
+       Rendered fresh rather than reusing the on-screen canvases, which are sized
+       to the pane: a narrow window would otherwise send a picture too coarse to
+       locate anything on. JPEG keeps the upload sane on a multi-page scan. */
+    async pageImages({ scale = 2, quality = 0.82 } = {}) {
+      const out = {};
+      if (!this.doc) return out;
+      for (let number = 1; number <= this.doc.numPages; number += 1) {
+        const page = await this.doc.getPage(number);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const context = canvas.getContext("2d", { alpha: false });
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: context, viewport }).promise;
+        out[String(number)] = canvas.toDataURL("image/jpeg", quality);
+      }
+      return out;
+    }
+
+    /* --------------------------------------------------------- cropping */
+
+    /* Cut each highlighted region out of the page as a PNG.
+
+       The value a reviewer approves is only as good as the mark it was read
+       from, so a save carries the crop back with it. Pages are rendered fresh at
+       a fixed scale rather than reusing the on-screen canvases: those are sized
+       to fit the pane, so a narrow window would post an unreadable crop. Each
+       page is rendered once and reused across every field that sits on it. */
+    async cropRegions(items, { scale = 2, padding = 0.006 } = {}) {
+      const out = {};
+      if (!this.doc) return out;
+      const sheets = new Map();
+      try {
+        for (const item of items || []) {
+          const rects = (item && item.rects) || [];
+          if (!item.page || !rects.length) continue;
+
+          let sheet = sheets.get(item.page);
+          if (!sheet) {
+            const page = await this.doc.getPage(item.page);
+            const viewport = page.getViewport({ scale });
+            sheet = document.createElement("canvas");
+            sheet.width = Math.ceil(viewport.width);
+            sheet.height = Math.ceil(viewport.height);
+            const context = sheet.getContext("2d", { alpha: false });
+            context.fillStyle = "#ffffff";
+            context.fillRect(0, 0, sheet.width, sheet.height);
+            await page.render({ canvasContext: context, viewport }).promise;
+            sheets.set(item.page, sheet);
+          }
+
+          const x0 = Math.max(0, Math.min(...rects.map((r) => r.x)) - padding);
+          const y0 = Math.max(0, Math.min(...rects.map((r) => r.y)) - padding);
+          const x1 = Math.min(1, Math.max(...rects.map((r) => r.x + r.w)) + padding);
+          const y1 = Math.min(1, Math.max(...rects.map((r) => r.y + r.h)) + padding);
+
+          const width = Math.max(1, Math.ceil((x1 - x0) * sheet.width));
+          const height = Math.max(1, Math.ceil((y1 - y0) * sheet.height));
+          const crop = document.createElement("canvas");
+          crop.width = width;
+          crop.height = height;
+          crop.getContext("2d").drawImage(
+            sheet,
+            Math.floor(x0 * sheet.width), Math.floor(y0 * sheet.height),
+            width, height, 0, 0, width, height
+          );
+          out[item.key] = {
+            base64Data: crop.toDataURL("image/png").split(",")[1],
+            contentType: "image/png",
+          };
+        }
+      } finally {
+        sheets.clear();
+      }
+      return out;
+    }
+
     focus(key, { scroll = true } = {}) {
       this.focusKey = key;
       this.drawHighlights();

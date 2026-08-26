@@ -21,42 +21,23 @@ log = logging.getLogger("extraction.cronos")
 
 FORMS_DIR = Path(__file__).resolve().parent / "cronos_forms"
 
-# The header block a reviewer confirms before any field mapping happens.  Cronos
-# owns this list in production; the mock serves the study/subject/visit groups
-# that every CRF page carries.
+# The header block a reviewer confirms before any field mapping happens. These
+# three, and only these three, are what `GetVisitCRFData` looks a visit up by, so
+# anything else asked here would be a question with nowhere to send the answer.
 HEADER_GROUPS: list[dict[str, Any]] = [
     {
-        "group_id": "study",
-        "name": "Study & site identity",
-        "fields": [
-            {"field_id": "protocol_no", "label": "Protocol No.", "type": "text", "required": True},
-            {"field_id": "study_title", "label": "Study title", "type": "text"},
-            {"field_id": "site_no", "label": "Site No.", "type": "text", "required": True},
-            {"field_id": "site_name", "label": "Site name", "type": "text"},
-            {"field_id": "investigator", "label": "Principal Investigator", "type": "text"},
-        ],
-    },
-    {
-        "group_id": "subject",
-        "name": "Subject identity",
-        "fields": [
-            {"field_id": "subject_no", "label": "Subject No.", "type": "text", "required": True},
-            {"field_id": "screening_no", "label": "Screening No.", "type": "text"},
-            {"field_id": "subject_initials", "label": "Subject initials", "type": "text"},
-            {"field_id": "date_of_birth", "label": "Date of birth", "type": "date"},
-            {"field_id": "age", "label": "Age", "type": "number", "unit": "years"},
-            {"field_id": "sex", "label": "Sex", "type": "select",
-             "options": ["Male", "Female", "Other", "Not reported"]},
-        ],
-    },
-    {
         "group_id": "visit",
-        "name": "Visit context",
+        "name": "Visit identity",
         "fields": [
-            {"field_id": "visit_name", "label": "Visit name", "type": "text", "required": True},
-            {"field_id": "visit_date", "label": "Visit date", "type": "date", "required": True},
-            {"field_id": "assessment_name", "label": "Screening test / assessment", "type": "text"},
-            {"field_id": "form_name", "label": "Form or page name", "type": "text"},
+            {"field_id": "protocol_no", "label": "Protocol No.", "type": "text",
+             "required": True,
+             "description": "The protocol number exactly as printed, slashes included."},
+            {"field_id": "screening_no", "label": "Screening No.", "type": "text",
+             "required": True,
+             "description": "The subject's screening number, digits only."},
+            {"field_id": "visit_name", "label": "Visit name", "type": "text",
+             "required": True,
+             "description": "The visit as the EDC names it, e.g. \"Visit 5\"."},
         ],
     },
 ]
@@ -114,6 +95,21 @@ def _summary(form: dict[str, Any]) -> dict[str, Any]:
             for s in sections
         ],
     }
+
+
+def local_forms() -> list[dict[str, Any]]:
+    """Every committed CRF definition, whichever connector is in use.
+
+    The EDC returns bare field names, so these are read alongside it for the
+    types, options and row labels it has no way to express.
+    """
+    out: list[dict[str, Any]] = []
+    for path in sorted(FORMS_DIR.glob("*.json")):
+        try:
+            out.append(json.loads(path.read_text(encoding="utf-8")))
+        except Exception as exc:
+            log.warning("skipping unreadable CRF definition %s: %s", path.name, exc)
+    return out
 
 
 class CronosUnavailable(RuntimeError):

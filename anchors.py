@@ -13,6 +13,7 @@ over a page rendered at any zoom.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any, Optional
 
@@ -23,6 +24,13 @@ MIN_FUZZY_CHARS = 4
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 _SEPARATOR_ROW = re.compile(r"^[\s|:+-]+$")
+
+
+def _line_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """The whole line containing [start, end) — a table row, in practice."""
+    return text.rfind("\n", 0, start) + 1, (
+        text.find("\n", end) if text.find("\n", end) >= 0 else len(text)
+    )
 
 
 def _normalise(text: str) -> tuple[str, list[int]]:
@@ -153,6 +161,10 @@ class PageIndex:
         row — so the quote alone would put the box on the row's first cell. The
         value is searched for inside the quoted span, which is what the box should
         actually sit on.
+
+        A `locator` match is only the printed label, so the value is never inside
+        it; the search widens to the rest of the line, where the value is sitting
+        in the next cell along.
         """
         if value is None:
             return start, end
@@ -161,14 +173,22 @@ class PageIndex:
         if not needle:
             return start, end
 
-        window = entry["raw"][start:end]
-        norm, mapping = _normalise(window)
-        position = norm.find(needle)
-        if position < 0 or not mapping:
-            return start, end
-        first = mapping[position]
-        last = mapping[min(position + len(needle), len(mapping)) - 1] + 1
-        return start + first, start + last
+        # These forms are full of character boxes — "[0][3][0][1][3]" for a
+        # screening number, "[1][6]/[0][2]" for a date. The brackets normalise to
+        # spaces, so the value's own characters have to be spread out to match.
+        spread = " ".join(needle.replace(" ", ""))
+        candidates = [needle] if spread == needle else [needle, spread]
+
+        for origin, stop in ((start, end), _line_span(entry["raw"], start, end)):
+            norm, mapping = _normalise(entry["raw"][origin:stop])
+            for candidate in candidates:
+                position = norm.find(candidate)
+                if position < 0 or not mapping:
+                    continue
+                first = mapping[position]
+                last = mapping[min(position + len(candidate), len(mapping)) - 1] + 1
+                return origin + first, origin + last
+        return start, end
 
     @staticmethod
     def _to_original(entry: dict[str, Any], start: int, end: int,
@@ -211,10 +231,12 @@ class PageIndex:
         entire table. Lines are evenly spaced in practice, so the row a value came
         from can be interpolated reliably.
 
-        Columns deliberately are not subdivided. The only proxy available is the
-        markdown column padding, which follows content length rather than the
-        rendered layout, and on a scan there is no text layer to check against — a
-        box over the wrong cell would be worse than an honest box over the row.
+        Columns are subdivided from the pipe positions in the markdown. Widths are
+        taken from the widest row rather than the matched one, so every row shares
+        one grid even where the parser has not padded the table to align. This is a
+        proxy for the printed column widths, not a reading of them, so the box is
+        still reported as approximate — but a box over the right cell beats one
+        stretched across the whole row, which located nothing at all.
         """
         text = entry["raw"][box_start:box_end]
         lines = text.split("\n")
@@ -244,17 +266,124 @@ class PageIndex:
             return [self._scale(entry, box)]
 
         position = rows.index(line_index)
+        left, right = self._columns(lines, rows, line_index, offset - spans[line_index][0])
         # The row is worked out against the item's full extent; the box that
         # happened to match may cover only part of it.
         frame = entry.get("extent") or box
+        top, bottom = self._bands(entry, frame, rows, spans, box_start)[position]
         scaled = self._scale(entry, {
-            "x": frame["x"],
-            "y": frame["y"] + frame["h"] * position / len(rows),
-            "w": frame["w"],
-            "h": frame["h"] / len(rows),
+            "x": frame["x"] + frame["w"] * left,
+            "y": top,
+            "w": frame["w"] * (right - left),
+            "h": bottom - top,
         })
         scaled["approximate"] = True
         return [scaled]
+
+    def _bands(self, entry: dict[str, Any], frame: dict[str, float],
+               rows: list[int], spans: list[tuple[int, int]],
+               box_start: int) -> list[tuple[float, float]]:
+        """Top and bottom of every row, pinned wherever the parser says.
+
+        A form table comes back as one box, so rows have to be placed inside it.
+        Spacing them evenly assumes every row is the same height, which is wrong
+        on exactly the tables that matter — a header where one row wraps to two
+        printed lines and the next is a single short line.
+
+        The parser does emit a few inner boxes carrying character ranges. Each of
+        those pins the row its range falls in to a real measurement; the rows in
+        between are then spread across whatever space is left. With no inner
+        boxes this degrades to the even spacing it replaces.
+        """
+        count = len(rows)
+        top, bottom = frame["y"], frame["y"] + frame["h"]
+        even = [(top + (bottom - top) * i / count,
+                 top + (bottom - top) * (i + 1) / count) for i in range(count)]
+
+        known: dict[int, tuple[float, float]] = {}
+        for candidate in entry["bbox"]:
+            start = candidate.get("start_index")
+            end = candidate.get("end_index")
+            if start is None or end is None or not self._usable(candidate):
+                continue
+            if self._is_page_sized(entry, candidate):
+                continue
+            # The box wrapping the whole item pins nothing — it is the frame.
+            if end - start >= len(entry["raw"]) - 1:
+                continue
+            for position, line in enumerate(rows):
+                first, last = spans[line][0] + box_start, spans[line][1] + box_start
+                if start < last and end > first:
+                    low, high = known.get(
+                        position, (candidate["y"], candidate["y"] + candidate["h"]))
+                    known[position] = (min(low, candidate["y"]),
+                                       max(high, candidate["y"] + candidate["h"]))
+        if not known:
+            return even
+
+        edges: list[Optional[float]] = [None] * (count + 1)
+        edges[0], edges[count] = top, bottom
+        for position, (low, high) in known.items():
+            edges[position] = low if edges[position] is None else min(edges[position], low)
+            edges[position + 1] = high if edges[position + 1] is None else max(
+                edges[position + 1], high)
+
+        index = 1
+        while index <= count:
+            if edges[index] is not None:
+                index += 1
+                continue
+            nxt = index
+            while edges[nxt] is None:
+                nxt += 1
+            low, high = edges[index - 1], edges[nxt]
+            step = (high - low) / (nxt - index + 1)
+            for k in range(index, nxt):
+                edges[k] = low + step * (k - index + 1)
+            index = nxt
+
+        bands = [(edges[i], edges[i + 1]) for i in range(count)]
+        # A measurement that disagrees with the reading order is a misread box,
+        # not a row: fall back rather than draw something incoherent.
+        if any(b <= a for a, b in bands):
+            return even
+        return bands
+
+    @staticmethod
+    def _columns(lines: list[str], rows: list[int], line_index: int,
+                 offset: int) -> tuple[float, float]:
+        """Left and right edge of the matched cell, as a fraction of the row.
+
+        Returns the full width whenever the shape cannot be trusted — a line that
+        is not a pipe row, or a table whose rows disagree on how many cells they
+        have, where guessing a column would place the box arbitrarily.
+        """
+        grid = [[p for p, char in enumerate(lines[i]) if char == "|"] for i in rows]
+        grid = [bars for bars in grid if len(bars) >= 2]
+        if not grid:
+            return 0.0, 1.0
+
+        # The width the parser reports for a table can fall a character short of
+        # its text, which costs the last row its closing pipe. The column count
+        # is therefore what most rows agree on, not what all of them do, and a
+        # row that disagrees is left out of the measurements rather than
+        # disabling columns for the whole table.
+        counts = Counter(len(bars) - 1 for bars in grid)
+        count = counts.most_common(1)[0][0]
+        grid = [bars for bars in grid if len(bars) - 1 == count]
+        if count < 1 or len(grid) < 2:
+            return 0.0, 1.0
+
+        bars = [p for p, char in enumerate(lines[line_index]) if char == "|"]
+        cell = next((k for k in range(min(count, len(bars) - 1))
+                     if bars[k] < offset <= bars[k + 1]), None)
+        if cell is None:
+            return 0.0, 1.0
+
+        widths = [max(bars[k + 1] - bars[k] for bars in grid) for k in range(count)]
+        total = sum(widths) or 1
+        before = sum(widths[:cell])
+        return before / total, (before + widths[cell]) / total
 
     @staticmethod
     def _usable(box: dict[str, Any]) -> bool:
@@ -289,10 +418,8 @@ class PageIndex:
         nothing verbatim and fuzzy-matches onto the wrong row. The `locator` — the
         row or field label as printed — is real text on the page and is tried first.
         """
-        candidates = [
-            text for text in (locator, evidence, None if value is None else str(value))
-            if text
-        ]
+        spoken = None if value is None else str(value)
+        candidates = [text for text in (locator, evidence, spoken) if text]
         if not candidates or not self._entries:
             return None
 
@@ -307,14 +434,27 @@ class PageIndex:
                 if not found:
                     continue
                 start, end, score = found
-                if rank == 0:  # matched on the quote — put the box on the value
+                # A locator names the row; widen from that cell across the value
+                # so the box covers "Pulse rate" and 080 together, not one or the other.
+                loc_rects: list[dict[str, float]] = []
+                if text != spoken:
+                    if text == locator:
+                        loc_rects = self._rects(entry, start, end)
                     start, end = self._narrow_to_value(entry, start, end, value)
                 rects = self._rects(entry, start, end)
+                if loc_rects:
+                    merged = merge_rects(loc_rects + rects)
+                    if merged:
+                        rects = [merged]
                 if not rects:
                     continue
                 # Prefer the quoted evidence over the bare value, an exact hit over a
-                # partial one, and the page the extractor said it read.
-                weight = score - (0.15 * rank) + (0.1 if entry["page"] == page_hint else 0.0)
+                # partial one, and the page the extractor said it read. Between two
+                # equally good matches the tighter box locates more.
+                area = sum(rect["w"] * rect["h"] for rect in rects)
+                weight = (score - (0.15 * rank)
+                          + (0.1 if entry["page"] == page_hint else 0.0)
+                          - (0.05 * min(area, 1.0)))
                 if best is None or weight > best["_weight"]:
                     best = {
                         "_weight": weight,

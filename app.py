@@ -28,8 +28,11 @@ from llama_cloud import AsyncLlamaCloud
 
 import anchors
 import cronos
+import edc
 import fields
 import mapping
+import vision
+import visit_forms
 from docx_export import build_docx
 from pdf_export import build_crf_pdf
 
@@ -324,7 +327,28 @@ def _layout_pages(result: Any) -> list[dict[str, Any]]:
             out.append(dump(mode="json") if dump else dict(page))
         except Exception as exc:  # a page we cannot read simply cannot be anchored
             log.warning("layout page skipped: %s", exc)
+    _dump_layout(out)
     return out
+
+
+def _dump_layout(pages: list[dict[str, Any]]) -> None:
+    """Write the raw layout to disk when DEBUG_LAYOUT_DIR is set.
+
+    Highlight placement can only be reasoned about against what the parser
+    actually returns — the box shapes, whether they carry character ranges, how a
+    table is split. Keeping a copy means that work does not cost a re-parse.
+    """
+    directory = (os.getenv("DEBUG_LAYOUT_DIR") or "").strip()
+    if not directory or not pages:
+        return
+    try:
+        target = Path(directory)
+        target.mkdir(parents=True, exist_ok=True)
+        path = target / "layout.json"
+        path.write_text(json.dumps(pages, indent=2, ensure_ascii=False), encoding="utf-8")
+        log.info("layout written to %s", path)
+    except Exception as exc:
+        log.warning("could not write layout dump: %s", exc)
 
 
 def _serialize(result: Any, meta: dict[str, Any]) -> dict[str, Any]:
@@ -359,9 +383,33 @@ def _serialize(result: Any, meta: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- routes
 
 
+_ASSET_REF = re.compile(r'(src|href)="(/static/[^"?]+)"')
+
+
+def _asset_stamp() -> str:
+    """A token that changes whenever any local asset does.
+
+    Without it a browser holding an older bundle shows an older flow, and there
+    is nothing on the page to say the code it is running is not the code on
+    disk — a stale build is indistinguishable from a bug.
+    """
+    newest = 0.0
+    for path in STATIC_DIR.rglob("*"):
+        if path.is_file():
+            newest = max(newest, path.stat().st_mtime)
+    return f"{int(newest)}"
+
+
 @app.get("/")
-async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+async def index() -> Response:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    stamp = _asset_stamp()
+    html = _ASSET_REF.sub(rf'\1="\2?v={stamp}"', html)
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 @app.get("/api/session")
@@ -722,6 +770,161 @@ async def map_to_form(job_id: str, request: MapRequest) -> dict[str, Any]:
     return payload
 
 
+# --------------------------------------------------------------------------- EDC visit
+
+
+class VisitRequest(BaseModel):
+    protocol_no: str
+    screening_no: str
+    visit_name: str
+
+
+def _visit_view(definition: dict[str, Any]) -> dict[str, Any]:
+    """The definition as the browser needs it — without the write-back map."""
+    return {
+        "form_id": definition["form_id"],
+        "form_name": definition["form_name"],
+        "form_description": definition["form_description"],
+        "visit": definition["visit"],
+        "sections": definition["sections"],
+        "crfs": [
+            {"crfId": crf["crfId"], "crfName": crf["crfName"],
+             "section_id": crf["section_id"], "field_count": len(crf["fields"]),
+             "row_count": len(crf["rows"]), "matched": crf["matched"],
+             "matched_form": crf["matched_form"], "match_score": crf["match_score"]}
+            for crf in definition["edc"]["crfs"]
+        ],
+    }
+
+
+@app.post("/api/documents/{job_id}/visit")
+async def load_visit(job_id: str, request: VisitRequest) -> dict[str, Any]:
+    """Step two: the CRFs the EDC holds for the confirmed visit."""
+    meta = _job_meta(job_id)
+    try:
+        visit = await edc.get_visit(request.protocol_no, request.screening_no,
+                                    request.visit_name)
+    except edc.EdcUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    definition = visit_forms.build_definition(visit, cronos.local_forms())
+    meta["visit_definition"] = definition
+    log.info("visit %s/%s/%s: %s CRF(s)", request.protocol_no, request.screening_no,
+             request.visit_name, len(definition["sections"]))
+    return {"document": _document_meta(job_id, meta), "form": _visit_view(definition),
+            "unsaveable": visit_forms.unsaveable(definition)}
+
+
+class VisitMapRequest(BaseModel):
+    header: dict[str, Any] = {}
+
+
+@app.post("/api/documents/{job_id}/visit/map")
+async def map_to_visit(job_id: str, request: VisitMapRequest) -> dict[str, Any]:
+    """Step three: read the document against the CRFs the EDC returned."""
+    meta, parse = await _parse_artifacts(job_id)
+    definition = meta.get("visit_definition")
+    if not definition:
+        raise HTTPException(
+            status_code=409,
+            detail="Load the visit from the EDC before mapping the document.",
+        )
+
+    document = fields.document_for_model(parse.get("pages") or [], parse.get("markdown") or "")
+    index = anchors.PageIndex(parse.get("items") or [])
+
+    header = mapping.build_header(meta.get("header_rows") or [], index)
+    _apply_header_edits(header, request.header)
+    confirmed = mapping.header_values(header["groups"])
+
+    started = time.monotonic()
+    try:
+        result = await fields.extract_form(document, definition, confirmed)
+    except fields.ExtractionUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    log.info("visit read for %s in %.1fs (%s value(s))", job_id,
+             time.monotonic() - started, len(result["values"]))
+
+    payload = {
+        "document": _document_meta(job_id, meta),
+        "header": header,
+        "form": mapping.build_form(definition, result["values"], index),
+    }
+    mapping.revalidate(payload)
+    payload["anchoring"] = bool(index)
+    payload["truncated"] = fields.was_truncated(document)
+    payload["usage"] = result.get("usage", {})
+    return payload
+
+
+class VisitSaveRequest(BaseModel):
+    payload: dict[str, Any]
+    # Field key -> {"base64Data": ..., "contentType": ...}: the crop of the page
+    # the value was read from, cut client-side where the rendered PDF already is.
+    crops: dict[str, dict[str, Any]] = {}
+    dry_run: bool = False
+
+
+@app.post("/api/documents/{job_id}/visit/save")
+async def save_visit(job_id: str, request: VisitSaveRequest) -> dict[str, Any]:
+    """Step four: send the reviewed values, and their source crops, to the EDC."""
+    meta = _job_meta(job_id)
+    definition = meta.get("visit_definition")
+    if not definition:
+        raise HTTPException(
+            status_code=409, detail="Load the visit from the EDC before saving."
+        )
+
+    reviewed = mapping.revalidate(request.payload)
+    body, warnings = visit_forms.build_save(definition, reviewed.get("form") or {},
+                                            request.crops)
+
+    refused = edc.check_images(body["crfs"])
+    if refused:
+        raise HTTPException(status_code=400, detail=refused)
+
+    counts = {
+        "fields": sum(len(c["fields"]) for c in body["crfs"]),
+        "values": sum(1 for c in body["crfs"] for f in c["fields"] if f["value"]),
+        "images": sum(len(c["images"]) for c in body["crfs"]),
+    }
+    if request.dry_run:
+        log.info("visit save for %s: dry run, nothing sent", job_id)
+        return {"sent": False, "dry_run": True, "counts": counts,
+                "warnings": warnings, "payload": body}
+
+    try:
+        result = await edc.save_visit(body)
+    except edc.EdcUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    log.info("visit save for %s: %s value(s), %s image(s)", job_id,
+             counts["values"], counts["images"])
+    return {"sent": True, "counts": counts, "warnings": warnings, "result": result}
+
+
+class LocateRequest(BaseModel):
+    # Page number -> a data URL of that page rendered as an image. The browser
+    # renders them, because the PDF never reaches the server after the parse.
+    pages: dict[str, str] = {}
+    targets: list[dict[str, Any]] = []
+
+
+@app.post("/api/documents/{job_id}/locate")
+async def locate_fields(job_id: str, request: LocateRequest) -> dict[str, Any]:
+    """Place values on the page (OpenAI vision or Tesseract)."""
+    if not vision.configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Box refinement isn't configured yet. Please contact your administrator.",
+        )
+    started = time.monotonic()
+    found = await vision.locate(request.pages, request.targets)
+    log.info("%s locate for %s: %s/%s in %.1fs", vision.model_name(), job_id,
+             len(found), len(request.targets), time.monotonic() - started)
+    return {"model": vision.model_name(), "located": found,
+            "requested": len(request.targets)}
+
+
 class CrfExport(BaseModel):
     payload: dict[str, Any]
     filename: str = "case-report-form"
@@ -793,6 +996,21 @@ async def submit_to_cronos(request: Submission) -> dict[str, Any]:
         raise HTTPException(
             status_code=502, detail="Cronos didn't accept the submission. Please try again."
         ) from exc
+
+
+@app.middleware("http")
+async def _no_stale_assets(request, call_next):
+    """Keep the browser off a cached build of the app outside production.
+
+    The served file and the one on disk drifting apart is indistinguishable from
+    a bug in the app itself — an old bundle shows an old flow and nothing says
+    why. Railway serves behind a CDN where caching is wanted, so the header only
+    goes on locally.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/static/") and not os.getenv("RAILWAY_ENVIRONMENT"):
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+    return response
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
