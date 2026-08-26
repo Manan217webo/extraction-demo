@@ -99,7 +99,8 @@ def _unticked_only(evidence: Optional[str]) -> bool:
 
 
 def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
-                 index: Optional[anchors.PageIndex], key: str) -> dict[str, Any]:
+                 index: Optional[anchors.PageIndex], key: str,
+                 region: Optional[list] = None) -> dict[str, Any]:
     raw = (row or {}).get("value")
     if (field.get("type") in {"select", "radio"}
             and _unticked_only((row or {}).get("evidence"))):
@@ -115,7 +116,7 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
                               "anchored": False, "rects": [], "match": "none"}
     if row and value is not None and index:
         found = index.anchor(row.get("evidence"), raw, row.get("page"),
-                             locator=row.get("locator"))
+                             locator=row.get("locator"), region=region)
         if found:
             source.update(
                 anchored=True,
@@ -126,6 +127,11 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
             )
     if value is not None and not source["anchored"]:
         issues.append("not_located_on_page")
+        # The parser could not place it, but we do know which block it belongs
+        # to. Naming that page beats repeating a page the model may have taken
+        # from the wrong CRF, and lets the locator go and look for it.
+        if region:
+            source["page"] = region[0][0]
     if value is not None and confidence is not None and confidence < LOW_CONFIDENCE:
         issues.append("low_confidence")
 
@@ -186,13 +192,21 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
                index: Optional[anchors.PageIndex]) -> dict[str, Any]:
     """Nested Cronos JSON — sections, plain fields, and repeating group instances."""
     by_address = {_address(row): row for row in rows}
+    # Each CRF is a titled block on the sheet. Confining a section's search to
+    # its own block stops a value being lifted from the CRF below it, where the
+    # same question is often asked again.
+    regions = (
+        index.section_regions([s.get("name") or "" for s in form.get("sections") or []])
+        if index else {}
+    )
 
     sections = []
     for section in form.get("sections") or []:
         section_id = section["section_id"]
+        region = regions.get(section.get("name") or "")
         built_fields = [
             _build_field(field, by_address.get((section_id, None, 1, field["field_id"])), index,
-                         f"{section_id}.{field['field_id']}")
+                         f"{section_id}.{field['field_id']}", region)
             for field in section.get("fields") or []
         ]
 
@@ -228,6 +242,7 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
                             by_address.get((section_id, group_id, instance, field["field_id"])),
                             index,
                             f"{section_id}.{group_id}.{number}.{field['field_id']}",
+                            region,
                         )
                         for field in group.get("fields") or []
                     ],
@@ -285,7 +300,12 @@ def highlights(*containers: dict[str, Any]) -> list[dict[str, Any]]:
     for container in containers:
         for path, field in iter_built(container):
             source = field.get("source") or {}
-            if not source.get("anchored"):
+            # Values the parser could not place are carried with no rectangle:
+            # the viewer draws nothing for them, and the locator is given the
+            # chance to find what the layout could not.
+            if not source.get("anchored") and (
+                field.get("value") in (None, "") or not source.get("page")
+            ):
                 continue
             out.append({
                 "key": field["key"],

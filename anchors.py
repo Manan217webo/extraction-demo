@@ -136,6 +136,66 @@ class PageIndex:
             sizes.setdefault(entry["page"], {"width": entry["width"], "height": entry["height"]})
         return sizes
 
+    # ------------------------------------------------------------------ regions
+
+    def _headings(self) -> list[tuple[int, float, str]]:
+        """Every heading on the sheet, in reading order, with where it starts."""
+        found = []
+        for entry in self._entries:
+            if entry.get("type") != "heading":
+                continue
+            extent = entry.get("extent")
+            if not extent:
+                continue
+            text, _ = _normalise(entry["raw"])
+            if text.strip():
+                found.append((entry["page"], extent["y"], text.strip()))
+        return sorted(found, key=lambda head: (head[0], head[1]))
+
+    def section_regions(self, titles: list[str]) -> dict[str, list[tuple[int, float, float]]]:
+        """The part of the sheet each titled block owns.
+
+        A source worksheet stacks a dozen CRFs down the page and several of them
+        ask the same question — three of these carry a "Date of assessment". Read
+        against the whole document, the answer for one can be lifted from another:
+        right by luck while the dates agree, wrong the moment they do not.
+
+        A block runs from its own heading to whichever heading comes next,
+        crossing pages where it has to.
+        """
+        heads = self._headings()
+        if not heads:
+            return {}
+        sizes = self.page_sizes
+        last = max(sizes) if sizes else 1
+
+        out: dict[str, list[tuple[int, float, float]]] = {}
+        for title in titles:
+            wanted = _normalise(title or "")[0].strip()
+            if not wanted:
+                continue
+            position = next(
+                (i for i, (_, _, text) in enumerate(heads)
+                 if text == wanted or wanted in text or text in wanted),
+                None,
+            )
+            if position is None:
+                continue
+            page, top, _ = heads[position]
+            if position + 1 < len(heads):
+                end_page, end_y, _ = heads[position + 1]
+            else:
+                end_page, end_y = last, float(sizes.get(last, {}).get("height") or 1e9)
+
+            spans: list[tuple[int, float, float]] = []
+            for number in range(page, end_page + 1):
+                height = float(sizes.get(number, {}).get("height") or 1e9)
+                spans.append((number,
+                              top if number == page else 0.0,
+                              end_y if number == end_page else height))
+            out[title] = spans
+        return out
+
     # ------------------------------------------------------------------ matching
 
     def _locate(self, entry: dict[str, Any], needle: str) -> Optional[tuple[int, int, float]]:

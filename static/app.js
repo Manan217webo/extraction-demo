@@ -952,6 +952,23 @@ function setStep(step) {
   els.extractedScroll.scrollTop = 0;
 }
 
+/* A quieter loader for work that runs behind an already usable page. The
+   blocking panel would hide the form a reviewer can read and correct while the
+   boxes are still being placed. */
+function working(container, text) {
+  const strip = document.createElement("div");
+  strip.className = "panel-busy panel-busy-inline";
+  const spinner = document.createElement("span");
+  spinner.className = "mini-spin";
+  spinner.setAttribute("aria-hidden", "true");
+  const label = document.createElement("p");
+  label.textContent = text;
+  strip.append(spinner, label);
+  strip.setAttribute("role", "status");
+  container.prepend(strip);
+  return () => strip.remove();
+}
+
 function busy(text) {
   els.panelBusyText.textContent = text;
   els.panelBusy.classList.remove("hidden");
@@ -1458,7 +1475,7 @@ async function loadVisit() {
 
   els.formPicker.classList.add("hidden");
   els.formBody.classList.remove("hidden");
-  busy("Asking the EDC which CRFs this visit has…");
+  busy("Connecting with Cronos…");
   try {
     const visit = await api(`/api/documents/${state.result.job_id}/visit`, {
       method: "POST",
@@ -1473,7 +1490,7 @@ async function loadVisit() {
     state.unsaveable = visit.unsaveable || [];
     renderVisitSummary(visit.form, header);
 
-    busy("Reading the document into those CRFs… this can take a minute.");
+    busy("Reading the document into the Cronos CRFs… this can take a minute.");
     const payload = await api(`/api/documents/${state.result.job_id}/visit/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1577,9 +1594,7 @@ async function refineBoxes() {
     }));
   if (!targets.length) return;
 
-  const badge = els.regionCount;
-  const original = badge.textContent;
-  badge.textContent = "…";
+  const done = working(els.formSections, "Connecting with Cronos… placing boxes on the page");
   try {
     const pages = await state.pdf.pageImages();
     const data = await api(`/api/documents/${state.result.job_id}/locate`, {
@@ -1595,16 +1610,16 @@ async function refineBoxes() {
     if (placed) {
       inlineNotice(
         els.formSections,
-        `${placed} of ${targets.length} boxes were placed by looking at the page ` +
-          `(${data.model}). The rest keep the position worked out from the parser's ` +
-          "layout, which is approximate.",
+        `${placed} of ${targets.length} boxes were placed by reading the page. ` +
+          "The rest keep the position worked out from the document's layout, " +
+          "which is approximate.",
         "info"
       );
     }
   } catch (error) {
     console.warn("boxes not refined", error);
   } finally {
-    badge.textContent = original;
+    done();
   }
 }
 

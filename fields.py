@@ -279,6 +279,12 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
                 "Transcribe this source document into the CRF below. Use the exact "
                 "section_id, group_id and field_id given. For a repeating group, create one "
                 "instance per row of data present on the page — do not pad out empty rows.\n\n"
+                "Each section below is a titled block on the page, and the sheet stacks "
+                "many of them. Read a section's fields ONLY from inside its own block. "
+                "Several blocks ask the same question — more than one carries a date of "
+                "assessment — so a value taken from the wrong block is wrong even when it "
+                "happens to read the same. If a section's block does not answer a field, "
+                "leave it out rather than borrowing from a neighbouring block.\n\n"
                 + "\n".join(lines)
                 + (f"\nConfirmed header context: {context}\n" if context else "")
                 + "\nDocument:\n\n" + document

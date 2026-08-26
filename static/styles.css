@@ -1389,3 +1389,23 @@ mark.current { background: var(--purple); color: #fff; }
   gap: 8px;
 }
 .visit-crf strong { font-size: 13px; color: var(--ink); }
+
+/* The same loader, but sitting in the flow rather than covering the panel — the
+   form stays readable and editable while the boxes are still being placed. */
+.panel-busy.panel-busy-inline {
+  position: static;
+  inset: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  margin: 14px 18px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #faf9fd;
+  backdrop-filter: none;
+  z-index: auto;
+  font-size: 12.5px;
+}
+.panel-busy.panel-busy-inline .mini-spin { width: 15px; height: 15px; border-width: 2px; }

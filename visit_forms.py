@@ -316,13 +316,19 @@ def build_structured_crf(crf: dict[str, Any]) -> dict[str, Any]:
         "edc": {
             "crfId": crf.get("crfId"),
             "crfName": crf.get("crfName"),
+            "crf_seq": crf.get("crf_seq"),
             "section_id": section_id,
             "structured": True,
             "fields": [
                 {"fieldName": f.get("field_name") or f.get("fieldName") or "",
                  "field_id": f.get("field_id"), "index": i,
                  "value": f.get("value") or "",
-                 "imageId": f.get("imageId")}
+                 "imageId": f.get("imageId"),
+                 # The field exactly as it arrived. The save hands each one back
+                 # unchanged apart from its value, so the request mirrors the
+                 # response — which is what the endpoint took before the layout
+                 # was added, and there is no reason for that to have changed.
+                 "record": f}
                 for i, f in enumerate(fields)
             ],
             "rows": [[]] * len(row_labels),
@@ -690,17 +696,26 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                     f"values read for it can be stored. Check this CRF in the EDC."
                 )
 
-        crfs.append({
+        crf: dict[str, Any] = {
             "crfName": meta["crfName"],
             "crfId": meta["crfId"],
+            # Each field goes back the way it came, carrying every identifier the
+            # EDC sent, with only its value replaced. Where the EDC describes its
+            # own layout that is the whole record; where it sends bare names it is
+            # the name alone. Either way the request mirrors the response, plus
+            # the images, which is the shape this endpoint has always taken.
             "fields": [
-                {**({"field_id": field["field_id"]} if field.get("field_id") is not None else {}),
+                {**(field.get("record") or {}),
+                 **({"field_id": field["field_id"]} if field.get("field_id") is not None else {}),
                  "fieldName": field["fieldName"],
                  "value": values.get(field["index"], field.get("value") or "")}
                 for field in meta["fields"]
             ],
             "images": images,
-        })
+        }
+        if meta.get("crf_seq") is not None:
+            crf["crf_seq"] = meta["crf_seq"]
+        crfs.append(crf)
 
     payload = {
         "protocolNo": edc["protocolNo"],
