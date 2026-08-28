@@ -1,0 +1,26 @@
+[project]
+name = "extraction-demo"
+version = "0.1.0"
+description = "Webo Healthtech — read a handwritten CRF and fill the matching Cronos EDC visit."
+# Pinned to one minor version on purpose: .python-version says 3.12, and a demo
+# is the wrong place to discover what 3.13 does to this dependency set. uv will
+# fetch a 3.12 toolchain by itself when the machine has none.
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    "llama-cloud>=2.8",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "reportlab>=4.2",
+    "pillow>=10.0",
+    "pytesseract>=0.3.10",
+]
+
+[tool.uv]
+# The modules sit flat at the repo root (app.py, edc.py, …) and are imported by
+# name rather than installed. Nothing to build, so uv manages the environment
+# without trying to package the project.
+package = false
