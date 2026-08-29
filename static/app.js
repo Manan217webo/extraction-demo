@@ -891,7 +891,10 @@ async function restoreSession() {
     if (state.edcSaved) markSavedToEdc();
     const located = collectHighlights(state.payload.form)
       .some((item) => item.match === "located");
-    if (!located) refineBoxes(prefetchPageImages());
+    if (!located) {
+      flowStart("Placing boxes on the page…");
+      refineBoxes(prefetchPageImages());
+    }
   }
 
   setStep(landing);
@@ -950,6 +953,7 @@ function setHighlights(highlights) {
 /* -------------------------------------------------------------------- steps */
 
 function resetMapping() {
+  flowEnd();
   state.header = null;
   state.payload = null;
   state.refined = null;
@@ -1094,7 +1098,8 @@ function inlineNotice(container, text, kind = "warn", action = null) {
 function fieldControl(field) {
   const value = field.value === null || field.value === undefined ? "" : String(field.value);
 
-  if (field.type === "radio" && (field.options || []).length <= 4) {
+  if (field.type === "radio" && (field.options || []).length > 0
+      && (field.options || []).length <= 4) {
     const row = document.createElement("div");
     row.className = "radio-row";
     (field.options || []).forEach((option) => {
@@ -1324,6 +1329,10 @@ function mergeRowBoxes(items) {
 
   rows.forEach((group) => {
     if (group.length < 2) return;
+    // Each value's rectangle is already widened to its row label by the
+    // locator, so the union of them starts at the label and ends at the last
+    // value — the whole printed row, which is what a crop of any value in it
+    // should show.
     const rects = group.flatMap((item) => item.rects);
     const top = Math.min(...rects.map((r) => r.y));
     const bottom = Math.max(...rects.map((r) => r.y + r.h));
@@ -1838,6 +1847,15 @@ async function refineBoxes(pagesPromise) {
 
   state.refining = true;
   try {
+    await refineBoxesInner(pagesPromise, targets);
+  } finally {
+    state.refining = false;
+    flowEnd();
+  }
+}
+
+async function refineBoxesInner(pagesPromise, targets) {
+  try {
     await (state.pdf.loaded || Promise.resolve());
     if (!state.payload) return;
     const pages = [...new Set(targets.map((item) => item.page))]
@@ -1879,8 +1897,6 @@ async function refineBoxes(pagesPromise) {
     saveSessionNow();
   } catch (error) {
     console.warn("boxes not refined", error);
-  } finally {
-    state.refining = false;
   }
 }
 

@@ -593,7 +593,15 @@ async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, d
                       "y0": min(box["y0"], box["ly0"]),
                       "x1": max(box["x1"], box["lx1"]),
                       "y1": max(box["y1"], box["ly1"])}
-            if joined["y1"] - joined["y0"] <= 2.5 * max(box["y1"] - box["y0"], 1):
+            # A label belongs to the value's row when their vertical spans
+            # overlap. Judging by the union's height rejected every label on
+            # the real form: "Seated Systolic Blood Pressure" wraps to two
+            # lines, so its box is twice the value's height and the union
+            # failed a height cap meant to catch a label from another row.
+            # Overlap is what actually separates the two cases.
+            value_h = max(box["y1"] - box["y0"], 1)
+            overlap = min(box["y1"], box["ly1"]) - max(box["y0"], box["ly0"])
+            if overlap >= 0.4 * value_h:
                 merged = joined
             else:
                 log.info("openai label for %s ignored, not on the value's row", box.get("id"))
