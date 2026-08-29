@@ -589,6 +589,12 @@ def build_definition(visit: dict[str, Any],
 
 # --------------------------------------------------------------------------- saving
 
+# A value carrying one of these was flagged by `mapping._coerce` as something the
+# field cannot represent. It stays on the review for a person to resolve; it does
+# not go into the EDC.
+BLOCKING_ISSUES = {"not_a_number", "not_an_allowed_option", "unrecognised_date",
+                   "unrecognised_time"}
+
 
 def repeated_names(crf: dict[str, Any]) -> dict[str, list[int]]:
     """Field names this CRF uses more than once, and the slots that share them.
@@ -666,6 +672,16 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 # The row-label column is ours, not the EDC's; it has nowhere to go.
                 if field.get("value") is not None and field.get("edc_index") is not None:
                     warnings.append(f"“{field['label']}” has no field in the EDC and was not sent.")
+                return
+            # A value the field cannot hold — "abc" in a number, "Not done" where
+            # the options are Normal/Abnormal — is kept on screen for the reviewer
+            # to fix, but it is not written into a clinical record as it stands.
+            blocking = set(field.get("issues") or []) & BLOCKING_ISSUES
+            if blocking and field.get("value") is not None:
+                warnings.append(
+                    f"“{field['label']}” reads {field['value']!r}, which this field cannot "
+                    f"hold ({', '.join(sorted(blocking))}). It was left unchanged in the EDC."
+                )
                 return
             if field.get("value") is not None:
                 values[index] = _as_text(field["value"])

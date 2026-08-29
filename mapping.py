@@ -46,13 +46,16 @@ def _coerce(value: Any, field: dict[str, Any]) -> tuple[Any, list[str]]:
         if not match:
             return text, ["not_a_number"]
         number = float(match.group(0))
-        number = int(number) if number.is_integer() else round(number, 4)
         low, high = field.get("min"), field.get("max")
         if low is not None and number < low:
             issues.append("below_expected_range")
         if high is not None and number > high:
             issues.append("above_expected_range")
-        return number, issues
+        # Kept as the characters that were written, not as a float. A pulse of
+        # "088" is transcribed as 088: turning it into 88 changed the record on
+        # every round trip, and the EDC received something the page never said.
+        # The number above is only for the range check.
+        return match.group(0), issues
 
     if kind == "date":
         for fmt in DATE_FORMATS:
@@ -75,8 +78,13 @@ def _coerce(value: Any, field: dict[str, Any]) -> tuple[Any, list[str]]:
         for option in options:
             if option.lower() == text.lower():
                 return option, issues
-        for option in options:  # "Abnormal, CS" against "Abnormal, clinically significant"
-            if text.lower().startswith(option.lower()) or option.lower().startswith(text.lower()):
+        # "Abnormal, CS" against "Abnormal, clinically significant" — the reader
+        # ran two columns together and the option is a prefix of what it wrote.
+        # The other direction is not allowed: a single letter is not a reading
+        # of anything. "N" used to resolve to "Normal", and "N" is exactly what
+        # a model produces for a bare tick or for "No" — a fabricated finding.
+        for option in options:
+            if len(text) >= 3 and text.lower().startswith(option.lower()):
                 return option, ["option_matched_loosely"]
         return text, ["not_an_allowed_option"]
 

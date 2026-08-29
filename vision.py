@@ -99,18 +99,8 @@ Return TWO rectangles for each target, and they are joined afterwards:
 Giving them separately is what lets a crop of the value be read on its own: the
 saved image shows "Pulse rate ... 088 beats/min", not a stray 088.
 
-Historic note, kept for the older single-rectangle behaviour: one rectangle that covers the label AND the value together, on the same
-row. Example: for Pulse rate 080 beats/min, the box starts at "Pulse rate" and
-ends after the handwritten 080 and "beats/min" — not the value alone, not the
-label alone.
-
-Include:
-  - the printed field or row label (e.g. "Pulse rate")
-  - the value (handwritten digits, ticked option, characters in comb boxes)
-  - the unit printed immediately after the value, if any (e.g. "beats/min")
-
-Do not stretch across the rest of the table row (other columns, other options,
-comments). Do not box only the label or only the value.
+Keep each rectangle tight to its own text. Do not stretch the value rectangle
+across the rest of the table row (other columns, other options, comments).
 
 Coordinates are integers on a 0 to 1000 grid, left to right and top to bottom,
 where 0,0 is the top-left corner of the page and 1000,1000 the bottom-right.
