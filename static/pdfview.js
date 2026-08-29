@@ -57,10 +57,18 @@
 
       this._onResize = debounce(() => this.relayout(), 180);
       window.addEventListener("resize", this._onResize);
+      // A window resize is not fired when the pane first appears, which on a
+      // slower Windows layout left clientWidth at 0 and the overlay unmeasurable.
+      this._sizeObserver = null;
+      if (typeof ResizeObserver === "function") {
+        this._sizeObserver = new ResizeObserver(this._onResize);
+        this._sizeObserver.observe(this.container);
+      }
     }
 
     destroy() {
       window.removeEventListener("resize", this._onResize);
+      if (this._sizeObserver) this._sizeObserver.disconnect();
       if (this.observer) this.observer.disconnect();
       if (this.doc) this.doc.destroy().catch(() => {});
       this.doc = null;
@@ -235,9 +243,10 @@
     drawHighlights(only) {
       const byPage = new Map();
       this.highlights.forEach((item) => {
-        if (!item || !item.page || !(item.rects || []).length) return;
-        if (!byPage.has(item.page)) byPage.set(item.page, []);
-        byPage.get(item.page).push(item);
+        const page = Number(item && item.page);
+        if (!item || !page || !(item.rects || []).length) return;
+        if (!byPage.has(page)) byPage.set(page, []);
+        byPage.get(page).push(item);
       });
 
       this.pages.forEach((page, number) => {
@@ -409,15 +418,39 @@
       this.focusKey = key;
       this.drawHighlights();
       if (!scroll || !key) return;
+      if (this._scrollToKey(key)) return true;
+      // Pages (and therefore boxes) may not exist yet on a slower machine.
+      const pending = this.loaded || Promise.resolve();
+      pending.then(() => {
+        if (this.focusKey !== key) return;
+        this.drawHighlights();
+        this._scrollToKey(key);
+      });
+      return false;
+    }
+
+    _scrollToKey(key) {
       const box = this.container.querySelector(`.pdf-hl[data-key~="${cssEscape(key)}"]`);
       if (!box) return false;
-      // Measured against the scroller rather than summed from offsetTop, which
-      // is relative to the page wrapper and only agreed with the pane by luck.
       const pane = this.container.getBoundingClientRect();
       const rect = box.getBoundingClientRect();
-      const target =
-        this.container.scrollTop + (rect.top - pane.top)
-        - this.container.clientHeight / 2 + rect.height / 2;
+      let target;
+      if (rect.width < 0.5 && rect.height < 0.5) {
+        // Overlay not painted yet, or hidden. Aim using the page wrapper and
+        // the box's own percentage coordinates instead of a 0×0 rectangle.
+        const wrap = box.closest(".pdf-page");
+        if (!wrap) return false;
+        const wr = wrap.getBoundingClientRect();
+        const y = parseFloat(box.style.top) / 100;
+        const h = parseFloat(box.style.height) / 100;
+        target =
+          this.container.scrollTop + (wr.top - pane.top) + wr.height * (y + h / 2)
+          - this.container.clientHeight / 2;
+      } else {
+        target =
+          this.container.scrollTop + (rect.top - pane.top)
+          - this.container.clientHeight / 2 + rect.height / 2;
+      }
       glideTo(this.container, Math.max(target, 0));
       box.classList.remove("is-flash");
       void box.offsetWidth;
@@ -439,6 +472,8 @@
      over from the old one. Honours the reduced-motion preference by jumping. */
   const glides = new WeakMap();
   function glideTo(pane, top, duration = 380) {
+    if (!pane) return;
+    pane.style.scrollBehavior = "auto";
     const start = pane.scrollTop;
     const distance = top - start;
     if (Math.abs(distance) < 1) return;

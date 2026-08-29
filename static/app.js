@@ -927,8 +927,9 @@ function showOriginal() {
     : state.file.arrayBuffer().then((bytes) => (state.fileBytes = bytes)))
     .then((bytes) => state.pdf.load(bytes))
     .then(() => {
-      // Warm page images during header confirm so locate does not wait on
-      // canvas work after the values are already on screen.
+      // Located boxes only — never parser rectangles. Re-apply after pages
+      // exist so a slower Windows layout does not miss the first draw.
+      refreshHighlights();
       prefetchPageImages();
     })
     .catch((error) => {
@@ -1927,7 +1928,15 @@ async function refineBoxesInner(pagesPromise, targets) {
     refreshHighlights();
     saveSessionNow();
   } catch (error) {
+    // Nothing else says why the page has no boxes. On a machine with no
+    // locator configured this is the only sign the reviewer will ever get.
     console.warn("boxes not refined", error);
+    inlineNotice(
+      els.formSections,
+      `Boxes couldn't be placed on the page: ${error.message} The values are ` +
+        "still read and can be saved; only the page highlights are missing.",
+      "warn"
+    );
   }
 }
 

@@ -171,12 +171,26 @@ def model_name() -> str:
 
 
 def _tesseract_cmd() -> Optional[str]:
+    """The tesseract binary, wherever this machine keeps it.
+
+    The installer on Windows puts it under Program Files and does not add it
+    to PATH, so `shutil.which` misses it there. Without these paths the
+    locator silently had no backend on Windows: every /locate answered 503
+    and, since only located boxes are drawn, the page showed no boxes at all.
+    """
+    program_files = [
+        os.environ.get("ProgramFiles") or r"C:\Program Files",
+        os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)",
+        os.environ.get("LOCALAPPDATA") or "",
+    ]
     for candidate in (
         (os.getenv("TESSERACT_CMD") or "").strip(),
         shutil.which("tesseract") or "",
         "/opt/homebrew/bin/tesseract",
         "/usr/local/bin/tesseract",
         "/usr/bin/tesseract",
+        *[os.path.join(base, "Tesseract-OCR", "tesseract.exe")
+          for base in program_files if base],
     ):
         if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate

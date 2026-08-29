@@ -919,34 +919,53 @@ mark.current { background: var(--purple); color: #fff; }
   flex-direction: column;
   align-items: center;
   gap: 16px;
-  scroll-behavior: smooth;
+  /* JS drives the animation. CSS smooth scroll on Windows Chrome swallows
+     programmatic scrollTop and the page never actually moves. */
+  scroll-behavior: auto;
 }
 .pdf-page {
   position: relative;
+  isolation: isolate;
   flex: none;
   background: #fff;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.3);
   border-radius: 2px;
 }
-.pdf-page canvas { display: block; border-radius: 2px; }
+.pdf-page canvas {
+  display: block;
+  border-radius: 2px;
+  position: relative;
+  z-index: 0;
+  pointer-events: none;
+}
 .pdf-page-num {
   position: absolute;
   right: 8px;
   bottom: 6px;
+  z-index: 2;
   font-size: 10px;
   font-weight: 800;
   color: #b9b4c6;
   pointer-events: none;
 }
-.pdf-overlay { position: absolute; inset: 0; }
+.pdf-overlay { position: absolute; inset: 0; z-index: 1; }
 .hide-regions .pdf-overlay { display: none; }
 
 .pdf-hl {
+  /* Windows paints native button chrome over these unless appearance is
+     stripped, which hid every box and left scroll-into-view with nothing
+     to measure. */
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  margin: 0;
   position: absolute;
   padding: 0;
   border: 2.5px solid var(--hl);
   border-radius: 3px;
   background: var(--hl-fill);
+  color: transparent;
+  font: inherit;
   cursor: pointer;
   box-shadow: 0 0 0 1px rgba(140, 30, 50, 0.22);
   transition: background 0.14s ease, box-shadow 0.14s ease;

@@ -967,9 +967,16 @@ class LocateRequest(BaseModel):
 async def locate_fields(job_id: str, request: LocateRequest) -> dict[str, Any]:
     """Place values on the page (OpenAI vision or Tesseract)."""
     if not vision.configured():
+        # Say what would fix it. On Windows this is the whole reason the page
+        # shows no boxes, and "contact your administrator" sent people looking
+        # in the wrong place.
         raise HTTPException(
             status_code=503,
-            detail="Box refinement isn't configured yet. Please contact your administrator.",
+            detail=(
+                "No box locator is configured on this server. Set "
+                "OPENAI_VISION_MODEL in .env, or install Tesseract and set "
+                "TESSERACT_CMD to its path."
+            ),
         )
     started = time.monotonic()
     # Keep the exact request when asked, so a placement can be replayed and
