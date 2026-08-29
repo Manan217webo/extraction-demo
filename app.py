@@ -965,6 +965,16 @@ async def locate_fields(job_id: str, request: LocateRequest) -> dict[str, Any]:
             detail="Box refinement isn't configured yet. Please contact your administrator.",
         )
     started = time.monotonic()
+    # Keep the exact request when asked, so a placement can be replayed and
+    # its raw model boxes inspected without another trip through the browser.
+    dump = (os.getenv("DEBUG_LAYOUT_DIR") or "").strip()
+    if dump:
+        try:
+            Path(dump).mkdir(parents=True, exist_ok=True)
+            (Path(dump) / "locate_pages.json").write_text(json.dumps(request.pages))
+            (Path(dump) / "locate_targets.json").write_text(json.dumps(request.targets))
+        except Exception as exc:
+            log.warning("could not dump locate request: %s", exc)
     found = await vision.locate(request.pages, request.targets)
     log.info("%s locate for %s: %s/%s in %.1fs", vision.model_name(), job_id,
              len(found), len(request.targets), time.monotonic() - started)

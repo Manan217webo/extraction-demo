@@ -1317,7 +1317,7 @@ function cssEscape(value) {
    The merge is refused when the union comes out far taller than the boxes it is
    made of: that means the values are not actually side by side, and merging
    would swallow the rows above and below. */
-function mergeRowBoxes(items) {
+function mergeRowBoxes(items, labels = []) {
   const rows = new Map();
   items.forEach((item) => {
     const parts = String(item.key || "").split(".");
@@ -1326,14 +1326,31 @@ function mergeRowBoxes(items) {
     if (!rows.has(key)) rows.set(key, []);
     rows.get(key).push(item);
   });
+  const labelFor = new Map();
+  labels.forEach((item) => {
+    const parts = String(item.key || "").split(".");
+    if (parts.length >= 4) labelFor.set(`${parts.slice(0, 3).join(".")}|${item.page}`, item.rects[0]);
+  });
 
-  rows.forEach((group) => {
-    if (group.length < 2) return;
+  rows.forEach((group, key) => {
+    const label = labelFor.get(key);
+    // A lone value is still widened to its label; only a merge needs two.
+    if (group.length < 2 && !label) return;
     // Each value's rectangle is already widened to its row label by the
     // locator, so the union of them starts at the label and ends at the last
     // value — the whole printed row, which is what a crop of any value in it
     // should show.
     const rects = group.flatMap((item) => item.rects);
+    if (label) {
+      // The parser boxes a table as one rectangle, so every row label
+      // inherits the table's top row: its x is the label column's left edge
+      // and is reliable, but its y is wrong for every row but the first.
+      // Take the x from the label and the y from the row's own located
+      // values — never let the label's y drag the box onto another row.
+      const vTop = Math.min(...rects.map((r) => r.y));
+      const vBot = Math.max(...rects.map((r) => r.y + r.h));
+      rects.push({ x: label.x, w: label.w, y: vTop, h: vBot - vTop });
+    }
     const top = Math.min(...rects.map((r) => r.y));
     const bottom = Math.max(...rects.map((r) => r.y + r.h));
     const tallest = Math.max(...rects.map((r) => r.h));
@@ -1355,13 +1372,25 @@ function mergeRowBoxes(items) {
 }
 
 function collectHighlights(container) {
+  return collectHighlightsWithLabels(container).filter((item) => !item.rowLabel);
+}
+
+function collectHighlightsWithLabels(container) {
   const out = [];
   const walk = (fields, groupName, instance, sectionName) => {
     (fields || []).forEach((field) => {
       // The row-name column names the row; it holds no entered data and has no
       // input on the form. Boxing it made it clickable, and clicking it
       // selected a field nothing on the right could scroll to.
-      if (field.row_name) return;
+      if (field.row_name) {
+        // Not drawn, but its rectangle is the printed row label — the one
+        // left edge every value in the row should reach.
+        const src = field.source || {};
+        if (src.page && (src.rects || []).length) {
+          out.push({ key: field.key, rowLabel: true, page: src.page, rects: src.rects });
+        }
+        return;
+      }
       const source = field.source || {};
       // A value the layout could not place is carried with no rectangle: the
       // viewer draws nothing for it, and the locator still gets to look for it.
@@ -1401,8 +1430,10 @@ function collectHighlights(container) {
 function boxesToDraw(container) {
   // Parser/interpolated rectangles cover whole tables and look wrong. Only
   // vision-located boxes are drawn, so a reviewer never sees the guess.
+  const all = collectHighlightsWithLabels(container);
   return mergeRowBoxes(
-    collectHighlights(container).filter((item) => item.match === "located")
+    all.filter((item) => !item.rowLabel && item.match === "located"),
+    all.filter((item) => item.rowLabel)
   );
 }
 

@@ -604,7 +604,9 @@ async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, d
             if overlap >= 0.4 * value_h:
                 merged = joined
             else:
-                log.info("openai label for %s ignored, not on the value's row", box.get("id"))
+                log.info("openai label for %s ignored, not on the value's row "
+                         "(value y %s-%s, label y %s-%s)", box.get("id"),
+                         box["y0"], box["y1"], box["ly0"], box["ly1"])
         rect = _sane_grid(merged)
         if rect is None:
             log.info("openai box for %s rejected: %s", box.get("id"), box)
