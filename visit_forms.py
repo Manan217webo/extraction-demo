@@ -767,8 +767,6 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                        for field in meta["fields"]],
             "images": images,
         }
-        if meta.get("crf_seq") is not None:
-            crf["crf_seq"] = meta["crf_seq"]
         crfs.append(crf)
 
     leftover = [key for key in crops if key not in used_crops and (crops[key] or {}).get("base64Data")]
