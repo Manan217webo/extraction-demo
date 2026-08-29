@@ -1786,36 +1786,40 @@ async function refineBoxes(pagesPromise) {
   if (!targets.length) return;
 
   state.refining = true;
-  const done = working(els.formSections, "Placing boxes on the page…");
   try {
     await (state.pdf.loaded || Promise.resolve());
     if (pagesPromise) pagesPromise.catch(() => {});
-    const pages = [...new Set(targets.map((item) => item.page))]
-      .filter((page) => page)
-      .sort((a, b) => a - b);
-    let placed = 0;
-    for (const page of pages) {
-      if (!state.payload) break;
-      const image = state.pdf.pageImage
-        ? await state.pdf.pageImage(page)
-        : (await state.pdf.pageImages())[String(page)];
-      if (!image) continue;
-      const batch = targets.filter((item) => item.page === page);
-      const data = await api(`/api/documents/${state.result.job_id}/locate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pages: { [String(page)]: image }, targets: batch }),
-      });
-      placed += applyLocated(data.located || {});
-      state.refined = { model: data.model, placed, requested: targets.length };
-      refreshHighlights();
-      saveSessionNow();
+    if (!state.payload) return;
+    const done = working(els.formSections, "Placing boxes on the page…");
+    try {
+      const pages = [...new Set(targets.map((item) => item.page))]
+        .filter((page) => page)
+        .sort((a, b) => a - b);
+      let placed = 0;
+      for (const page of pages) {
+        if (!state.payload) break;
+        const image = state.pdf.pageImage
+          ? await state.pdf.pageImage(page)
+          : (await state.pdf.pageImages())[String(page)];
+        if (!image) continue;
+        const batch = targets.filter((item) => item.page === page);
+        const data = await api(`/api/documents/${state.result.job_id}/locate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pages: { [String(page)]: image }, targets: batch }),
+        });
+        placed += applyLocated(data.located || {});
+        state.refined = { model: data.model, placed, requested: targets.length };
+        refreshHighlights();
+        saveSessionNow();
+      }
+    } finally {
+      done();
     }
   } catch (error) {
     console.warn("boxes not refined", error);
   } finally {
     state.refining = false;
-    done();
   }
 }
 
