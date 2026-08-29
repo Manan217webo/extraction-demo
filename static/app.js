@@ -1913,7 +1913,20 @@ async function refineBoxesInner(pagesPromise, targets) {
     }
     const send = {};
     pages.forEach((page) => { if (images[String(page)]) send[String(page)] = images[String(page)]; });
-    if (!Object.keys(send).length || !state.payload) return;
+    if (!state.payload) return;
+    if (!Object.keys(send).length) {
+      // The locator works from page images, and those come from the loaded
+      // PDF. With the PDF not showing this used to return without a word —
+      // which read as "boxes don't work" when the boxes were never asked for.
+      inlineNotice(
+        els.formSections,
+        "Boxes couldn't be placed because the original page isn't loaded in this " +
+          "browser. The values are still read and can be saved; only the page " +
+          "highlights are missing.",
+        "warn"
+      );
+      return;
+    }
 
     const data = await api(`/api/documents/${state.result.job_id}/locate`, {
       method: "POST",
