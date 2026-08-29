@@ -75,9 +75,11 @@ class Span:
 
 
 GRID = 1000.0
-# One page of a visit CRF is typically 15–40 fields. A single vision call per
-# page avoids a second round-trip that used to sit behind the first.
-BATCH = 48
+# The model's time grows with the number of targets in one request: seven
+# targets placed in ~10s, forty in ~30s. A page's targets are split into
+# batches of this size and the batches run concurrently, so a dense page
+# costs about one batch's worth of time rather than all of them in series.
+BATCH = 14
 
 OPENAI_RULES = """You are shown one page of a scanned clinical case report form.
 

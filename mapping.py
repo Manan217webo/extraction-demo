@@ -75,6 +75,13 @@ def _coerce(value: Any, field: dict[str, Any]) -> tuple[Any, list[str]]:
 
     if kind in {"select", "radio"}:
         options = field.get("options") or []
+        # A radio or select the EDC declared without any options — its
+        # `data-csv` is missing — cannot reject a value: there is no list to be
+        # outside of. The value is kept as read, unflagged. Without this, every
+        # such field showed "outside the allowed options" against a correct
+        # reading (a °F unit read off a ticked box, for instance).
+        if not options:
+            return text, issues
         for option in options:
             if option.lower() == text.lower():
                 return option, issues

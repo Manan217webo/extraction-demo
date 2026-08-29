@@ -1349,6 +1349,10 @@ function collectHighlights(container) {
   const out = [];
   const walk = (fields, groupName, instance, sectionName) => {
     (fields || []).forEach((field) => {
+      // The row-name column names the row; it holds no entered data and has no
+      // input on the form. Boxing it made it clickable, and clicking it
+      // selected a field nothing on the right could scroll to.
+      if (field.row_name) return;
       const source = field.source || {};
       // A value the layout could not place is carried with no rectangle: the
       // viewer draws nothing for it, and the locator still gets to look for it.
