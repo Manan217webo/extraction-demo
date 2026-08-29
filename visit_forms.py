@@ -589,6 +589,29 @@ def build_definition(visit: dict[str, Any],
 
 # --------------------------------------------------------------------------- saving
 
+
+def _save_field(field: dict[str, Any], value: str) -> dict[str, Any]:
+    """One field as SaveVisitCRFData wants it.
+
+    A structured deployment identifies a field by `field_id` and reads its
+    `field_name`, `table_row_number` and `control_type` alongside the value. A
+    deployment still returning bare names has only `fieldName` to go on.
+    """
+    record = field.get("record") or {}
+    out: dict[str, Any] = {}
+    if field.get("field_id") is not None:
+        out["field_id"] = field["field_id"]
+        out["field_name"] = record.get("field_name") or field["fieldName"]
+        out["value"] = value
+        if record.get("table_row_number") is not None:
+            out["table_row_number"] = record["table_row_number"]
+        if record.get("control_type"):
+            out["control_type"] = record["control_type"]
+    else:
+        out["fieldName"] = field["fieldName"]
+        out["value"] = value
+    return out
+
 # A value carrying one of these was flagged by `mapping._coerce` as something the
 # field cannot represent. It stays on the review for a person to resolve; it does
 # not go into the EDC.
@@ -702,7 +725,7 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 images_by_index[index] = blob
                 images.append({
                     **({"field_id": slot["field_id"]} if slot.get("field_id") is not None else {}),
-                    "fieldName": slot["fieldName"],
+                    "field_name": slot["fieldName"],
                     **blob,
                 })
 
@@ -734,22 +757,14 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         crf: dict[str, Any] = {
             "crfName": meta["crfName"],
             "crfId": meta["crfId"],
-            # Each field goes back the way it came, carrying every identifier the
-            # EDC sent, with only its value replaced. Where the EDC describes its
-            # own layout that is the whole record; where it sends bare names it is
-            # the name alone. Either way the request mirrors the response, plus
-            # the images, which is the shape this endpoint has always taken.
-            # Source crops are written onto the field as well as the images list:
-            # some EDC deployments read base64Data off the field, and a reviewer
-            # inspecting the JSON will see the image next to the value.
-            "fields": [
-                {**(field.get("record") or {}),
-                 **({"field_id": field["field_id"]} if field.get("field_id") is not None else {}),
-                 "fieldName": field["fieldName"],
-                 "value": values.get(field["index"], field.get("value") or ""),
-                 **(images_by_index.get(field["index"]) or {})}
-                for field in meta["fields"]
-            ],
+            # Exactly what SaveVisitCRFData documents per field: its id, its
+            # name, its value, the row it sits in and the control it is drawn
+            # with. The rest of the GET record — grid coordinates, vAttributes,
+            # section sequence — is layout, not data, and is not echoed back;
+            # nor is the source crop, which travels in `images` alone. A
+            # deployment still on bare names gets `fieldName` and `value`.
+            "fields": [_save_field(field, values.get(field["index"], field.get("value") or ""))
+                       for field in meta["fields"]],
             "images": images,
         }
         if meta.get("crf_seq") is not None:
