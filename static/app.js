@@ -1010,6 +1010,41 @@ function setStep(step) {
   els.extractedScroll.scrollTop = 0;
 }
 
+/* The post-header flow as one story.
+
+   Connecting, reading and placing used to be three unrelated loaders that
+   replaced each other, so a reviewer could not tell how far along the whole
+   thing was. One strip stays put and updates its line; the form paints
+   underneath it as soon as values arrive. */
+let flowStrip = null;
+
+function flowStart(text) {
+  flowEnd();
+  flowStrip = document.createElement("div");
+  flowStrip.className = "panel-busy panel-busy-inline";
+  flowStrip.setAttribute("role", "status");
+  const spinner = document.createElement("span");
+  spinner.className = "mini-spin";
+  spinner.setAttribute("aria-hidden", "true");
+  const label = document.createElement("p");
+  label.textContent = text;
+  flowStrip.append(spinner, label);
+  els.formSections.prepend(flowStrip);
+}
+
+function flowStep(text) {
+  if (!flowStrip) return flowStart(text);
+  const label = flowStrip.querySelector("p");
+  if (label) label.textContent = text;
+  // Rendering the form clears formSections; keep the strip on top of it.
+  if (!flowStrip.isConnected) els.formSections.prepend(flowStrip);
+}
+
+function flowEnd() {
+  if (flowStrip) flowStrip.remove();
+  flowStrip = null;
+}
+
 /* A quieter loader for work that runs behind an already usable page. The
    blocking panel would hide the form a reviewer can read and correct while the
    boxes are still being placed. */
@@ -1648,8 +1683,12 @@ async function loadVisit() {
 
   els.formPicker.classList.add("hidden");
   els.formBody.classList.remove("hidden");
-  prefetchPageImages();
-  busy("Connecting with Cronos…");
+  els.formSections.innerHTML = "";
+  flowStart("Connecting with Cronos…");
+  // The model read is the long part and needs no page image, so every page is
+  // rendered to an image during it rather than after — free work in a wait
+  // that was happening anyway.
+  const pageImages = prefetchPageImages();
   try {
     const visit = await api(`/api/documents/${state.result.job_id}/visit`, {
       method: "POST",
@@ -1664,29 +1703,29 @@ async function loadVisit() {
     state.unsaveable = visit.unsaveable || [];
     renderVisitSummary(visit.form, header);
 
-    busy("Reading the document into the Cronos CRFs… this can take a minute.");
-    const pageImages = prefetchPageImages();
+    const crfs = (visit.form.crfs || []).length;
+    flowStep(`Reading the document into ${crfs} CRF${crfs === 1 ? "" : "s"}…`);
     const payload = await api(`/api/documents/${state.result.job_id}/visit/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ header }),
     });
     state.payload = payload;
-    // Locate starts before the form paints, and parser boxes are never drawn,
-    // so the first thing on the page is a vision box rather than a table guess.
-    refineBoxes(pageImages);
     renderForm(payload);
     saveSessionNow();
     els.extractedScroll.scrollTop = 0;
+    // The form is usable from here. Boxes land into it as they are placed.
+    await refineBoxes(pageImages);
   } catch (error) {
+    flowEnd();
     els.formSections.innerHTML = "";
     inlineNotice(els.formSections, error.message, "warn", {
       label: "Try again",
       onClick: loadVisit,
     });
-  } finally {
-    idle();
+    return;
   }
+  flowEnd();
 }
 
 /* What the EDC holds for this visit, shown while the document is being read. */
@@ -1759,12 +1798,20 @@ function renderVisitSummary(form, header) {
 
 function prefetchPageImages() {
   if (!state.pdf) return Promise.resolve({});
+  // Rendered once per loaded document. This is asked for from header confirm,
+  // from load-visit and from a restore, and rendering every page three times
+  // over is work a reviewer waits on.
+  if (state.pdf.imagesPromise) return state.pdf.imagesPromise;
   const ready = state.pdf.loaded || Promise.resolve();
-  return ready.then(() => (state.pdf && state.pdf.doc ? state.pdf.pageImages() : {}))
+  const viewer = state.pdf;
+  viewer.imagesPromise = ready
+    .then(() => (viewer.doc ? viewer.pageImages() : {}))
     .catch((error) => {
       console.warn("page images not ready", error);
+      viewer.imagesPromise = null; // let a later call try again
       return {};
     });
+  return viewer.imagesPromise;
 }
 
 function locateTargets() {
@@ -1788,39 +1835,74 @@ async function refineBoxes(pagesPromise) {
   state.refining = true;
   try {
     await (state.pdf.loaded || Promise.resolve());
-    if (pagesPromise) pagesPromise.catch(() => {});
     if (!state.payload) return;
-    const done = working(els.formSections, "Placing boxes on the page…");
+    const pages = [...new Set(targets.map((item) => item.page))]
+      .filter((page) => page)
+      .sort((a, b) => a - b);
+    flowStep(`Placing boxes on ${pages.length} page${pages.length === 1 ? "" : "s"}…`);
+
+    // Every page goes up in one request. The server places pages concurrently,
+    // so three pages cost about one page's worth of time — sending them one
+    // at a time in a loop threw that away and tripled the wait.
+    let images = {};
     try {
-      const pages = [...new Set(targets.map((item) => item.page))]
-        .filter((page) => page)
-        .sort((a, b) => a - b);
-      let placed = 0;
-      for (const page of pages) {
-        if (!state.payload) break;
-        const image = state.pdf.pageImage
-          ? await state.pdf.pageImage(page)
-          : (await state.pdf.pageImages())[String(page)];
-        if (!image) continue;
-        const batch = targets.filter((item) => item.page === page);
-        const data = await api(`/api/documents/${state.result.job_id}/locate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pages: { [String(page)]: image }, targets: batch }),
-        });
-        placed += applyLocated(data.located || {});
-        state.refined = { model: data.model, placed, requested: targets.length };
-        refreshHighlights();
-        saveSessionNow();
-      }
-    } finally {
-      done();
+      images = (await pagesPromise) || {};
+    } catch {
+      images = {};
     }
+    const missing = pages.filter((page) => !images[String(page)]);
+    if (missing.length) {
+      const rest = await Promise.all(missing.map((page) =>
+        state.pdf.pageImage(page).then((image) => [String(page), image])
+      ));
+      rest.forEach(([page, image]) => { if (image) images[page] = image; });
+    }
+    const send = {};
+    pages.forEach((page) => { if (images[String(page)]) send[String(page)] = images[String(page)]; });
+    if (!Object.keys(send).length || !state.payload) return;
+
+    const data = await api(`/api/documents/${state.result.job_id}/locate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pages: send, targets }),
+    });
+    if (!state.payload) return;
+    const located = data.located || {};
+    const placed = applyLocated(located);
+    refreshFieldMeta(Object.keys(located));
+    state.refined = { model: data.model, placed, requested: targets.length };
+    refreshHighlights();
+    saveSessionNow();
   } catch (error) {
     console.warn("boxes not refined", error);
   } finally {
     state.refining = false;
   }
+}
+
+/* Redraw the meta line (page chip, flags, evidence) of the given fields in
+   place. The inputs are left alone so a value mid-edit is not disturbed. */
+function refreshFieldMeta(keys) {
+  const byKey = new Map();
+  const collect = (field) => byKey.set(field.key, field);
+  ((state.payload.form || {}).sections || []).forEach((section) => {
+    (section.fields || []).forEach(collect);
+    (section.groups || []).forEach((group) =>
+      (group.instances || []).forEach((instance) => (instance.fields || []).forEach(collect))
+    );
+  });
+  keys.forEach((key) => {
+    const field = byKey.get(key);
+    const row = els.extractedScroll.querySelector(`.field[data-key="${cssEscape(key)}"]`);
+    if (!field || !row) return;
+    const fresh = renderField(field, { compact: row.classList.contains("is-compact") });
+    const oldMeta = row.querySelector(".field-meta");
+    const newMeta = fresh.querySelector(".field-meta");
+    if (oldMeta && newMeta) oldMeta.replaceWith(newMeta);
+    else if (oldMeta) oldMeta.remove();
+    else if (newMeta) row.querySelector(".field-input").appendChild(newMeta);
+    row.classList.toggle("is-flagged", (field.issues || []).length > 0);
+  });
 }
 
 /* Write the located rectangles onto the fields they belong to. */
@@ -1836,6 +1918,9 @@ function applyLocated(located) {
       rects: hit.rects,
       match: "located",
     };
+    // The "not located" flag was raised because the parser could not place
+    // this value. The locator just did, so the complaint no longer stands.
+    field.issues = (field.issues || []).filter((code) => code !== "not_located_on_page");
     placed += 1;
   };
   ((state.payload.form || {}).sections || []).forEach((section) => {
