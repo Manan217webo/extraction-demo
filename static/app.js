@@ -338,6 +338,7 @@ function startProcessing() {
   const mode = activeMode();
   els.processing.classList.remove("hidden");
   els.processingFile.textContent = state.file ? state.file.name : "";
+  els.processing.classList.remove("is-done");
   els.processingTitle.textContent = "Reading your document";
   els.processingFoot.textContent = mode
     ? `${mode.name} usually takes ${mode.speed.toLowerCase()}. You can leave this open.`
@@ -443,7 +444,12 @@ async function pollOnce(jobId) {
       li.classList.add("done");
       li.classList.remove("active");
     });
-    await new Promise((resolve) => setTimeout(resolve, 260));
+    // A beat of "done" before the viewer takes over. Cutting straight from a
+    // spinner to a form read as the spinner giving up, not finishing.
+    els.processing.classList.add("is-done");
+    els.processingTitle.textContent = header ? "Document read" : "Document read — header not matched";
+    els.processingFoot.textContent = "";
+    await new Promise((resolve) => setTimeout(resolve, 900));
     stopProcessing();
 
     // Confirm header is the only landing. The raw markdown dump is not a step.
@@ -1015,6 +1021,136 @@ function setStep(step) {
   els.extractedScroll.scrollTop = 0;
 }
 
+/* ----------------------------------------------------------------- status
+
+   One component for every step's state. A step is loading, then it either
+   succeeded or failed, and it looks the same whichever step it is — so a
+   reviewer learns the shape once. Success is a beat, not a vanishing act:
+   the check draws in, then the strip fades. */
+
+const STATUS_ICONS = {
+  loading: '<span class="mini-spin" aria-hidden="true"></span>',
+  success: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.8" opacity=".35"/>'
+    + '<path d="M7.5 12.5l3 3 6-6.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">'
+    + '<path d="M12 3.5 21 19H3L12 3.5Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>'
+    + '<path d="M12 9v4.5M12 16.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  error: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.8"/>'
+    + '<path d="M12 7.5v5.5M12 16.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  info: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">'
+    + '<circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.8"/>'
+    + '<path d="M12 11v5.5M12 7.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+};
+
+function statusNode({ kind = "info", title = "", detail = "", action = null }) {
+  const node = document.createElement("div");
+  node.className = `status status--${kind}`;
+  node.setAttribute("role", kind === "error" || kind === "warn" ? "alert" : "status");
+  const icon = document.createElement("span");
+  icon.className = "status-icon";
+  icon.innerHTML = STATUS_ICONS[kind] || STATUS_ICONS.info;
+  const body = document.createElement("div");
+  body.className = "status-body";
+  const heading = document.createElement("p");
+  heading.className = "status-title";
+  heading.textContent = title;
+  body.appendChild(heading);
+  if (detail) {
+    const text = document.createElement("p");
+    text.className = "status-detail";
+    text.textContent = detail;
+    body.appendChild(text);
+  }
+  node.append(icon, body);
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn-primary status-action";
+    button.textContent = action.label;
+    button.addEventListener("click", action.onClick);
+    node.appendChild(button);
+  }
+  return node;
+}
+
+function leave(node, after = 0) {
+  if (!node || !node.isConnected) return;
+  setTimeout(() => {
+    node.classList.add("is-leaving");
+    const ms = parseFloat(getComputedStyle(node).animationDuration) * 1000 || 0;
+    setTimeout(() => node.remove(), ms);
+  }, after);
+}
+
+/* A status that can move through its states in place. */
+function status(container, opts) {
+  let node = statusNode(opts);
+  container.prepend(node);
+  const handle = {
+    get node() { return node; },
+    update(next) {
+      const fresh = statusNode({ ...opts, ...next });
+      if (node.isConnected) node.replaceWith(fresh); else container.prepend(fresh);
+      node = fresh;
+      return handle;
+    },
+    success(next, { ttl = 2800 } = {}) {
+      handle.update({ kind: "success", ...next });
+      if (ttl) leave(node, ttl);
+      return handle;
+    },
+    error(next) { return handle.update({ kind: "error", ...next }); },
+    remove() { leave(node); },
+  };
+  return handle;
+}
+
+/* ------------------------------------------------------------------ toast
+
+   For confirmations that need no reply: copied, saved. Low, brief, gone. */
+function toast(text, kind = "success", ttl = 2400) {
+  let host = document.querySelector(".toast-host");
+  if (!host) {
+    host = document.createElement("div");
+    host.className = "toast-host";
+    document.body.appendChild(host);
+  }
+  const node = document.createElement("div");
+  node.className = `toast toast--${kind}`;
+  node.setAttribute("role", "status");
+  const icon = document.createElement("span");
+  icon.className = "toast-icon";
+  icon.innerHTML = kind === "success" ? STATUS_ICONS.success : STATUS_ICONS.error;
+  const label = document.createElement("span");
+  label.textContent = text;
+  node.append(icon, label);
+  host.appendChild(node);
+  leave(node, ttl);
+  return node;
+}
+
+/* A button that shows it is working, then that it is done. */
+function buttonBusy(button, text) {
+  const original = { text: button.textContent, disabled: button.disabled };
+  button.disabled = true;
+  button.classList.add("is-loading");
+  if (text) button.textContent = text;
+  return () => {
+    button.classList.remove("is-loading");
+    button.textContent = original.text;
+    button.disabled = original.disabled;
+  };
+}
+
+function buttonDone(button, text) {
+  button.classList.remove("is-loading");
+  button.classList.add("is-done");
+  button.disabled = true;
+  if (text) button.textContent = text;
+}
+
 /* The post-header flow as one story.
 
    Connecting, reading and placing used to be three unrelated loaders that
@@ -1023,26 +1159,24 @@ function setStep(step) {
    underneath it as soon as values arrive. */
 let flowStrip = null;
 
-function flowStart(text) {
+function flowStart(text, detail = "") {
   flowEnd();
-  flowStrip = document.createElement("div");
-  flowStrip.className = "panel-busy panel-busy-inline";
-  flowStrip.setAttribute("role", "status");
-  const spinner = document.createElement("span");
-  spinner.className = "mini-spin";
-  spinner.setAttribute("aria-hidden", "true");
-  const label = document.createElement("p");
-  label.textContent = text;
-  flowStrip.append(spinner, label);
-  els.formSections.prepend(flowStrip);
+  flowStrip = status(els.formSections, { kind: "loading", title: text, detail });
 }
 
-function flowStep(text) {
-  if (!flowStrip) return flowStart(text);
-  const label = flowStrip.querySelector("p");
-  if (label) label.textContent = text;
+function flowStep(text, detail = "") {
+  if (!flowStrip) return flowStart(text, detail);
+  flowStrip.update({ kind: "loading", title: text, detail });
   // Rendering the form clears formSections; keep the strip on top of it.
-  if (!flowStrip.isConnected) els.formSections.prepend(flowStrip);
+  if (!flowStrip.node.isConnected) els.formSections.prepend(flowStrip.node);
+}
+
+/* The step finished: say so, then get out of the way. */
+function flowSuccess(text, detail = "") {
+  if (!flowStrip) flowStrip = status(els.formSections, { kind: "loading", title: text });
+  if (!flowStrip.node.isConnected) els.formSections.prepend(flowStrip.node);
+  flowStrip.success({ title: text, detail });
+  flowStrip = null;
 }
 
 function flowEnd() {
@@ -1054,17 +1188,8 @@ function flowEnd() {
    blocking panel would hide the form a reviewer can read and correct while the
    boxes are still being placed. */
 function working(container, text) {
-  const strip = document.createElement("div");
-  strip.className = "panel-busy panel-busy-inline";
-  const spinner = document.createElement("span");
-  spinner.className = "mini-spin";
-  spinner.setAttribute("aria-hidden", "true");
-  const label = document.createElement("p");
-  label.textContent = text;
-  strip.append(spinner, label);
-  strip.setAttribute("role", "status");
-  container.prepend(strip);
-  return () => strip.remove();
+  const handle = status(container, { kind: "loading", title: text });
+  return () => handle.remove();
 }
 
 function busy(text) {
@@ -1077,21 +1202,13 @@ function idle() {
 }
 
 function inlineNotice(container, text, kind = "warn", action = null) {
-  const notice = document.createElement("div");
-  notice.className = `notice-inline ${kind === "warn" ? "" : kind}`.trim();
-  const message = document.createElement("p");
-  message.textContent = text;
-  notice.appendChild(message);
-  if (action) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "btn btn-primary notice-action";
-    button.textContent = action.label;
-    button.addEventListener("click", action.onClick);
-    notice.appendChild(button);
-  }
-  container.prepend(notice);
-  return notice;
+  // A long message reads better as a short title and a detail line.
+  const split = text.indexOf(": ");
+  const title = split > 0 && split < 70 ? text.slice(0, split) : text;
+  const detail = split > 0 && split < 70 ? text.slice(split + 2) : "";
+  const node = statusNode({ kind, title, detail, action });
+  container.prepend(node);
+  return node;
 }
 
 /* -------------------------------------------------------------- field inputs */
@@ -1747,6 +1864,7 @@ async function loadVisit() {
     state.visit = visit.form;
     state.unsaveable = visit.unsaveable || [];
     renderVisitSummary(visit.form, header);
+    els.formSections.appendChild(formSkeleton());
 
     const crfs = (visit.form.crfs || []).length;
     flowStep(`Reading the document into ${crfs} CRF${crfs === 1 ? "" : "s"}…`);
@@ -1771,6 +1889,19 @@ async function loadVisit() {
     return;
   }
   flowEnd();
+}
+
+/* Where the form will be, while the document is still being read. */
+function formSkeleton() {
+  const wrap = document.createElement("div");
+  wrap.className = "form-skeleton";
+  wrap.setAttribute("aria-hidden", "true");
+  ["", "w-80", "", "w-60", ""].forEach((w) => {
+    const row = document.createElement("div");
+    row.className = `sk-row ${w}`.trim();
+    wrap.appendChild(row);
+  });
+  return wrap;
 }
 
 /* What the EDC holds for this visit, shown while the document is being read. */
@@ -1940,6 +2071,12 @@ async function refineBoxesInner(pagesPromise, targets) {
     state.refined = { model: data.model, placed, requested: targets.length };
     refreshHighlights();
     saveSessionNow();
+    const all = placed === targets.length;
+    flowSuccess(
+      all ? "Every value placed on the page" : `${placed} of ${targets.length} values placed on the page`,
+      all ? "Click a box to jump to its field, or a field to jump to its box."
+          : "The rest were read but couldn't be found on the page — they're still editable."
+    );
   } catch (error) {
     // Nothing else says why the page has no boxes. On a machine with no
     // locator configured this is the only sign the reviewer will ever get.
@@ -2080,15 +2217,16 @@ function cropTargets(form) {
 function markSavedToEdc() {
   state.edcSaved = true;
   savingToEdc = false;
-  els.sendCronos.disabled = true;
-  els.sendCronos.textContent = "Saved to Cronos";
+  buttonDone(els.sendCronos, "Saved to Cronos");
   els.formSections.querySelectorAll("[data-edc-saved]").forEach((el) => el.remove());
-  const notice = inlineNotice(
-    els.formSections,
-    "Your data has been saved in Cronos",
-    "info"
-  );
-  notice.dataset.edcSaved = "1";
+  const counts = state.lastSave;
+  const detail = counts
+    ? `${counts.values} value${counts.values === 1 ? "" : "s"} across ${counts.fields} field${counts.fields === 1 ? "" : "s"}, ` +
+      `with ${counts.images} source image${counts.images === 1 ? "" : "s"} attached.`
+    : "The values and their source images are now in the EDC.";
+  const node = statusNode({ kind: "success", title: "Saved to Cronos", detail });
+  node.dataset.edcSaved = "1";
+  els.formSections.prepend(node);
 }
 
 async function saveToEdc() {
@@ -2096,6 +2234,7 @@ async function saveToEdc() {
   savingToEdc = true;
   const button = els.sendCronos;
   button.disabled = true;
+  button.classList.add("is-loading");
   try {
     // Every value that was located on the page travels with a crop of the mark it
     // was read from, so the EDC keeps the source beside the datum.
@@ -2129,7 +2268,9 @@ async function saveToEdc() {
     });
 
     (result.warnings || []).forEach((warning) => inlineNotice(els.formSections, warning));
+    state.lastSave = result.counts || null;
     markSavedToEdc();
+    toast("Saved to Cronos");
     els.extractedScroll.scrollTop = 0;
     saveSessionNow();
   } catch (error) {
@@ -2139,6 +2280,7 @@ async function saveToEdc() {
       onClick: saveToEdc,
     });
     els.extractedScroll.scrollTop = 0;
+    button.classList.remove("is-loading");
     button.textContent = "Save to EDC";
     button.disabled = false;
   } finally {
@@ -2368,6 +2510,7 @@ els.copyBtn.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(result.text || result.markdown || "");
     els.copyBtn.textContent = "Copied";
+    toast("Copied to clipboard");
     setTimeout(() => (els.copyBtn.textContent = "Copy text"), 1400);
   } catch {
     els.copyBtn.textContent = "Press Ctrl+C";

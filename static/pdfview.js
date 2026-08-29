@@ -479,7 +479,9 @@
     if (Math.abs(distance) < 1) return;
     const reduce = window.matchMedia
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) {
+    // A hidden tab gets no animation frames, so a glide started there would
+    // never arrive. Jump instead; the reviewer is not watching anyway.
+    if (reduce || document.visibilityState !== "visible") {
       pane.scrollTop = top;
       return;
     }
