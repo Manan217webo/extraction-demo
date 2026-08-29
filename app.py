@@ -9,12 +9,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
+
+# pdf.js ships as .mjs. Python 3.12 (and Windows, which reads MIME types from
+# the registry) often has no mapping for that extension, so Starlette serves
+# the files as text/plain. Browsers then refuse the ES module and the original
+# document pane stays empty. Register it before any FileResponse guesses.
+mimetypes.add_type("text/javascript", ".mjs")
 
 import httpx
 from dotenv import load_dotenv
@@ -1065,9 +1072,28 @@ async def _no_stale_assets(request, call_next):
     goes on locally.
     """
     response = await call_next(request)
-    if request.url.path.startswith("/static/") and not os.getenv("RAILWAY_ENVIRONMENT"):
+    path = request.url.path
+    if path.startswith("/static/") and path.endswith(".mjs"):
+        response.headers["content-type"] = "text/javascript; charset=utf-8"
+    if path.startswith("/static/") and not os.getenv("RAILWAY_ENVIRONMENT"):
         response.headers["Cache-Control"] = "no-store, must-revalidate"
     return response
+
+
+@app.get("/static/vendor/pdf.min.mjs")
+async def _pdfjs_lib() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "vendor" / "pdf.min.mjs",
+        media_type="text/javascript",
+    )
+
+
+@app.get("/static/vendor/pdf.worker.min.mjs")
+async def _pdfjs_worker() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "vendor" / "pdf.worker.min.mjs",
+        media_type="text/javascript",
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -354,10 +354,16 @@
     <script type="module">
       // pdf.js ships as an ES module; the rest of the app is classic script, so it
       // is published on `window` and announced once the worker is configured.
-      import * as pdfjsLib from "/static/vendor/pdf.min.mjs";
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdf.worker.min.mjs";
-      window.pdfjsLib = pdfjsLib;
-      window.dispatchEvent(new Event("pdfjs-ready"));
+      try {
+        const pdfjsLib = await import("/static/vendor/pdf.min.mjs");
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/vendor/pdf.worker.min.mjs";
+        window.pdfjsLib = pdfjsLib;
+        window.dispatchEvent(new Event("pdfjs-ready"));
+      } catch (error) {
+        console.error("pdf.js failed to load", error);
+        window.__pdfjsError = error;
+        window.dispatchEvent(new Event("pdfjs-failed"));
+      }
     </script>
     <script src="/static/vendor/marked.min.js"></script>
     <script src="/static/vendor/purify.min.js"></script>

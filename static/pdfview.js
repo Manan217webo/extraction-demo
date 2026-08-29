@@ -16,16 +16,19 @@
     if (readyPromise) return readyPromise;
     readyPromise = new Promise((resolve, reject) => {
       if (window.pdfjsLib) return resolve(window.pdfjsLib);
+      const finish = (error) => {
+        clearTimeout(timer);
+        if (window.pdfjsLib) resolve(window.pdfjsLib);
+        else reject(error || new Error("viewer unavailable"));
+      };
       const timer = setTimeout(
-        () => reject(new Error("The document viewer took too long to load.")),
+        () => finish(new Error("The document viewer took too long to load.")),
         15000
       );
+      window.addEventListener("pdfjs-ready", () => finish(), { once: true });
       window.addEventListener(
-        "pdfjs-ready",
-        () => {
-          clearTimeout(timer);
-          window.pdfjsLib ? resolve(window.pdfjsLib) : reject(new Error("viewer unavailable"));
-        },
+        "pdfjs-failed",
+        () => finish(window.__pdfjsError || new Error("viewer unavailable")),
         { once: true }
       );
     });
