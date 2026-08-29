@@ -120,6 +120,7 @@ _client: Optional[AsyncLlamaCloud] = None
 _org_id: Optional[str] = None
 _credits_cache: dict[str, Any] = {"at": 0.0, "value": None}
 _credits_lock = asyncio.Lock()
+_header_inflight: dict[str, asyncio.Task] = {}
 
 
 # --------------------------------------------------------------------------- config
@@ -638,11 +639,38 @@ async def _header_pages(job_id: str, meta: dict[str, Any]) -> list[dict[str, Any
     return pages[:HEADER_PAGE_LIMIT]
 
 
-@app.post("/api/documents/{job_id}/header")
-async def read_header(job_id: str) -> dict[str, Any]:
+def _header_response(job_id: str, meta: dict[str, Any], header: dict[str, Any],
+                     parse: dict[str, Any], document: str, pages: list[dict[str, Any]],
+                     usage: dict[str, Any]) -> dict[str, Any]:
+    index = anchors.PageIndex(parse.get("items") or [])
+    return {
+        "document": _document_meta(job_id, meta),
+        "header": header,
+        "highlights": mapping.highlights(header),
+        "summary": header["summary"],
+        "anchoring": bool(index),
+        "truncated": fields.was_truncated(document),
+        "header_pages_read": len(pages),
+        "usage": usage,
+    }
+
+
+async def _read_header(job_id: str) -> dict[str, Any]:
     """Step one: what we believe the document's header block says."""
     meta = _job_meta(job_id)
     started = time.monotonic()
+
+    if "header_rows" in meta and meta.get("parse"):
+        parse = meta["parse"]
+        pages = (parse.get("pages") or [])[:HEADER_PAGE_LIMIT]
+        document = fields.document_for_model(pages, "")
+        header = mapping.build_header(
+            meta["header_rows"], anchors.PageIndex(parse.get("items") or [])
+        )
+        log.info("header cache hit for %s", job_id)
+        return _header_response(
+            job_id, meta, header, parse, document, pages, meta.get("header_usage") or {}
+        )
 
     # The layout download is the slow half and the model call does not need it,
     # so the two run together rather than one after the other.
@@ -665,21 +693,32 @@ async def read_header(job_id: str) -> dict[str, Any]:
         layout.cancel()
         raise
 
-    index = anchors.PageIndex(parse.get("items") or [])
-    header = mapping.build_header(result["values"], index)
+    header = mapping.build_header(
+        result["values"], anchors.PageIndex(parse.get("items") or [])
+    )
     meta["header_rows"] = result["values"]
+    meta["header_usage"] = result.get("usage", {})
     log.info("header stage for %s took %.1fs", job_id, time.monotonic() - started)
 
-    return {
-        "document": _document_meta(job_id, meta),
-        "header": header,
-        "highlights": mapping.highlights(header),
-        "summary": header["summary"],
-        "anchoring": bool(index),
-        "truncated": fields.was_truncated(document),
-        "header_pages_read": len(pages),
-        "usage": result.get("usage", {}),
-    }
+    return _header_response(
+        job_id, meta, header, parse, document, pages, result.get("usage", {})
+    )
+
+
+@app.post("/api/documents/{job_id}/header")
+async def read_header(job_id: str) -> dict[str, Any]:
+    """Join an in-flight read so a refresh does not stack another OpenAI wait."""
+    existing = _header_inflight.get(job_id)
+    if existing is not None and not existing.done():
+        log.info("joining in-flight header read for %s", job_id)
+        return await asyncio.shield(existing)
+    task = asyncio.create_task(_read_header(job_id))
+    _header_inflight[job_id] = task
+    try:
+        return await asyncio.shield(task)
+    finally:
+        if _header_inflight.get(job_id) is task:
+            _header_inflight.pop(job_id, None)
 
 
 @app.get("/api/cronos/forms")

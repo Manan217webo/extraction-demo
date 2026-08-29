@@ -1492,7 +1492,13 @@ function renderForm(payload) {
       const label = document.createElement("span");
       label.textContent = group.label;
       const count = document.createElement("span");
-      count.textContent = `${(group.instances || []).length} recorded`;
+      // Every row Cronos defines is shown, so the row count alone says nothing
+      // about the scan. Filled-of-total is what a reviewer needs to know.
+      const instances = group.instances || [];
+      const filled = instances.filter((instance) =>
+        (instance.fields || []).some((field) => field.value !== null && field.value !== "")
+      ).length;
+      count.textContent = `${filled} of ${instances.length} filled`;
       groupHead.append(label, count);
       body.appendChild(groupHead);
 

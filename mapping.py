@@ -232,15 +232,24 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
                 if row.get("section_id") == section_id and row.get("group_id") == group_id
             })
             instances = instances[: group.get("max_instances") or len(instances)]
-            # Instances are renumbered from 1 after dropping any the model opened
-            # but never filled, so the row a reviewer sees and the key a red box
-            # is filed under always agree.
-            kept = [
-                instance for instance in instances
-                if any(by_address.get((section_id, group_id, instance, field["field_id"]),
-                                      {}).get("value") is not None
-                       for field in group.get("fields") or [])
-            ]
+            if group.get("positional_rows"):
+                # Every row Cronos defines is shown, filled or not. The form on
+                # the right is the CRF as the EDC holds it; a row the scan did
+                # not answer is an empty row for a reviewer to fill, not a row
+                # that never existed. Rows are numbered by their printed
+                # position, so nothing is renumbered and nothing is dropped.
+                kept = list(range(1, (group.get("max_instances") or len(instances) or 0) + 1))
+            else:
+                # A free-form group has no fixed row count: instances are
+                # renumbered from 1 after dropping any the model opened but
+                # never filled, so the row a reviewer sees and the key a red
+                # box is filed under always agree.
+                kept = [
+                    instance for instance in instances
+                    if any(by_address.get((section_id, group_id, instance, field["field_id"]),
+                                          {}).get("value") is not None
+                           for field in group.get("fields") or [])
+                ]
             built_instances = []
             for number, instance in enumerate(kept, start=1):
                 built_instances.append({

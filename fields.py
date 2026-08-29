@@ -34,8 +34,15 @@ MAX_DOCUMENT_CHARS = 180_000
 # single dropped socket. Connecting is given a few seconds; reading is bounded
 # to what a large form actually needs, and the request is retried on top.
 REQUEST_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT_SECONDS") or 90)
+# The header is three fields on the first pages. A stalled socket used to sit
+# through 90s × three attempts while the UI stayed on "Matching the document
+# header". Fail that small call quickly and retry once on a fresh connection.
+HEADER_TIMEOUT = float(os.getenv("OPENAI_HEADER_TIMEOUT_SECONDS") or 25)
+# Structured output with no cap never finished on this prompt: OpenAI kept the
+# socket open until our timeout. The same call with a token cap returns in ~3s.
+HEADER_MAX_TOKENS = int(os.getenv("OPENAI_HEADER_MAX_TOKENS") or 800)
 CONNECT_TIMEOUT = 10.0
-TRANSPORT_RETRIES = 2
+TRANSPORT_RETRIES = 1
 
 # Reasoning models (gpt-5*, o1/o3, terra) reject `temperature`. Remembering a
 # 400 here means the next call — and every locate batch — skips the wasted retry.
@@ -65,17 +72,27 @@ def configured() -> bool:
 # --------------------------------------------------------------------------- document
 
 
+def _sanitize_for_model(text: str) -> str:
+    """Strip characters that stall OpenAI structured output.
+
+    A plus-minus in visit windows (`Day 57±3`) made gpt-4.1-mini's json_schema
+    decoder emit NUL bytes until the socket timed out. Replacing it keeps the
+    meaning and lets the call finish.
+    """
+    return (text or "").replace("\x00", "").replace("±", "+/-")
+
+
 def document_for_model(pages: list[dict[str, Any]], markdown: str) -> str:
     """Page-tagged markdown, so the model can tell us which page it read a value on."""
     if pages:
         chunks = [
             f"<page number=\"{page.get('page_number') or index + 1}\">\n"
-            f"{(page.get('content') or '').strip()}\n</page>"
+            f"{_sanitize_for_model(page.get('content') or '').strip()}\n</page>"
             for index, page in enumerate(pages)
         ]
         document = "\n\n".join(chunks)
     else:
-        document = f"<page number=\"1\">\n{(markdown or '').strip()}\n</page>"
+        document = f"<page number=\"1\">\n{_sanitize_for_model(markdown).strip()}\n</page>"
 
     if len(document) > MAX_DOCUMENT_CHARS:
         document = document[:MAX_DOCUMENT_CHARS] + "\n\n<!-- document truncated -->"
@@ -311,7 +328,7 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
 # --------------------------------------------------------------------------- transport
 
 
-async def _post(payload: dict[str, Any]) -> dict[str, Any]:
+async def _post(payload: dict[str, Any], timeout: Optional[float] = None) -> dict[str, Any]:
     """One request, retried across transport failures only.
 
     A dropped socket, a stalled read or a refused connect is retried straight
@@ -319,25 +336,36 @@ async def _post(payload: dict[str, Any]) -> dict[str, Any]:
     caller decides what a 400 means. Retrying blindly on status would double
     the cost of every rejected request.
     """
-    timeout = httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT)
-    last: Optional[BaseException] = None
+    limit = REQUEST_TIMEOUT if timeout is None else timeout
+    timeout_cfg = httpx.Timeout(limit, connect=CONNECT_TIMEOUT, write=15.0, pool=10.0)
+    return_value: Optional[httpx.Response] = None
     for attempt in range(TRANSPORT_RETRIES + 1):
+        started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=timeout) as http:
+            async with httpx.AsyncClient(
+                timeout=timeout_cfg,
+                http2=False,
+                limits=httpx.Limits(max_keepalive_connections=0),
+            ) as http:
                 return_value = await http.post(
                     f"{API_BASE}/chat/completions",
                     headers={"Authorization": f"Bearer {_api_key()}",
-                             "Content-Type": "application/json"},
+                             "Content-Type": "application/json",
+                             "Connection": "close"},
                     json=payload,
                 )
             break
         except httpx.TransportError as exc:
-            last = exc
+            elapsed = time.monotonic() - started
             if attempt >= TRANSPORT_RETRIES:
+                log.warning("field extraction transport failure (%s) after %.1fs",
+                            type(exc).__name__, elapsed)
                 raise
-            log.warning("field extraction transport failure (%s), retrying: %s",
-                        type(exc).__name__, exc or "connection dropped")
+            log.warning("field extraction transport failure (%s) after %.1fs, retrying",
+                        type(exc).__name__, elapsed)
             await asyncio.sleep(1.5 * (attempt + 1))
+    if return_value is None:
+        raise RuntimeError("field extraction request was not sent")
     if return_value.status_code >= 400:
         raise httpx.HTTPStatusError(
             return_value.text, request=return_value.request, response=return_value
@@ -351,9 +379,12 @@ def _unsupported(detail: str, *needles: str) -> bool:
 
 
 async def complete(messages: list[Any], schema: dict[str, Any], schema_name: str,
-                   model: Optional[str] = None) -> dict[str, Any]:
+                   model: Optional[str] = None,
+                   timeout: Optional[float] = None,
+                   max_tokens: Optional[int] = None) -> dict[str, Any]:
     """A structured completion against any model on the configured account."""
-    return await _complete(messages, schema, schema_name, model=model)
+    return await _complete(messages, schema, schema_name, model=model,
+                           timeout=timeout, max_tokens=max_tokens)
 
 
 def _uses_temperature(model: str) -> bool:
@@ -363,8 +394,32 @@ def _uses_temperature(model: str) -> bool:
     return not any(marker in lowered for marker in _NO_TEMPERATURE_MARKERS)
 
 
+def _prompt_chars(messages: list[Any]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total += len(part["text"])
+    return total
+
+
+def _json_object_payload(payload: dict[str, Any], messages: list[Any],
+                         schema: dict[str, Any]) -> None:
+    payload["response_format"] = {"type": "json_object"}
+    payload["messages"] = messages + [{
+        "role": "system",
+        "content": "Reply with JSON matching this schema exactly:\n" + json.dumps(schema),
+    }]
+
+
 async def _complete(messages: list[Any], schema: dict[str, Any],
-                    schema_name: str, model: Optional[str] = None) -> dict[str, Any]:
+                    schema_name: str, model: Optional[str] = None,
+                    timeout: Optional[float] = None,
+                    max_tokens: Optional[int] = None) -> dict[str, Any]:
     """One completion, degrading gracefully across model families."""
     if not configured():
         raise ExtractionUnavailable(
@@ -382,11 +437,28 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
     }
     if _uses_temperature(chosen):
         payload["temperature"] = 0
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
 
     for attempt in range(4):
         try:
-            data = await _post(payload)
+            log.info("calling %s on %s (%s chars, attempt %s, timeout=%ss)",
+                     schema_name, chosen, _prompt_chars(payload["messages"]),
+                     attempt + 1, int(REQUEST_TIMEOUT if timeout is None else timeout))
+            data = await _post(payload, timeout=timeout)
             break
+        except httpx.TimeoutException as exc:
+            log.warning("field extraction timed out on %s/%s", schema_name, chosen)
+            fmt = (payload.get("response_format") or {}).get("type")
+            if fmt == "json_schema":
+                log.warning("retrying %s without strict json_schema", schema_name)
+                _json_object_payload(payload, messages, schema)
+                continue
+            log.error("field extraction transport error (%s): %s",
+                      type(exc).__name__, exc or "connection dropped")
+            raise ExtractionUnavailable(
+                "We couldn't reach the field-extraction service. Please try again."
+            ) from exc
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text or ""
             # Reasoning models reject `temperature`; older models reject json_schema.
@@ -395,15 +467,14 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
                 payload.pop("temperature")
                 _NO_TEMPERATURE.add(chosen)
                 continue
+            if exc.response.status_code == 400 and "max_tokens" in payload \
+                    and _unsupported(detail, "max_tokens"):
+                payload["max_completion_tokens"] = payload.pop("max_tokens")
+                continue
             if exc.response.status_code == 400 and _unsupported(
                 detail, "response_format", "json_schema"
             ):
-                payload["response_format"] = {"type": "json_object"}
-                payload["messages"] = messages + [{
-                    "role": "system",
-                    "content": "Reply with JSON matching this schema exactly:\n"
-                               + json.dumps(schema),
-                }]
+                _json_object_payload(payload, messages, schema)
                 continue
             log.error("field extraction rejected (%s): %s", exc.response.status_code, detail[:400])
             if exc.response.status_code in (401, 403):
@@ -500,7 +571,10 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 
 async def extract_header(document: str) -> dict[str, Any]:
-    result = await _complete(header_prompt(document), HEADER_SCHEMA, "crf_header")
+    result = await _complete(
+        header_prompt(document), HEADER_SCHEMA, "crf_header",
+        timeout=HEADER_TIMEOUT, max_tokens=HEADER_MAX_TOKENS,
+    )
     allowed = set(cronos.HEADER_FIELD_IDS)
     rows: dict[str, dict[str, Any]] = {}
     for raw in result.get("values") or []:
