@@ -12,10 +12,12 @@ connector hands us, however many repeating groups it has.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 from typing import Any, Optional
 
 import httpx
@@ -27,7 +29,18 @@ log = logging.getLogger("extraction.fields")
 API_BASE = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
 DEFAULT_MODEL = "gpt-4o"
 MAX_DOCUMENT_CHARS = 180_000
-REQUEST_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT_SECONDS") or 240)
+# A stalled connection used to cost the whole timeout before anything was
+# retried — a reviewer sat on "Matching the document header" for minutes over a
+# single dropped socket. Connecting is given a few seconds; reading is bounded
+# to what a large form actually needs, and the request is retried on top.
+REQUEST_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT_SECONDS") or 90)
+CONNECT_TIMEOUT = 10.0
+TRANSPORT_RETRIES = 2
+
+# Reasoning models (gpt-5*, o1/o3, terra) reject `temperature`. Remembering a
+# 400 here means the next call — and every locate batch — skips the wasted retry.
+_NO_TEMPERATURE: set[str] = set()
+_NO_TEMPERATURE_MARKERS = ("gpt-5", "o1", "o3", "o4", "terra")
 
 
 class ExtractionUnavailable(RuntimeError):
@@ -197,6 +210,8 @@ def header_prompt(document: str) -> list[dict[str, str]]:
             if field.get("options"):
                 bits.append(f", one of: {', '.join(field['options'])}")
             bits.append(")")
+            if field.get("description"):
+                bits.append(f" — {field['description']}")
             lines.append("".join(bits))
     return [
         {"role": "system", "content": RULES},
@@ -297,13 +312,32 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
 
 
 async def _post(payload: dict[str, Any]) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as http:
-        return_value = await http.post(
-            f"{API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {_api_key()}",
-                     "Content-Type": "application/json"},
-            json=payload,
-        )
+    """One request, retried across transport failures only.
+
+    A dropped socket, a stalled read or a refused connect is retried straight
+    away with a short pause; an HTTP status is never retried here, because the
+    caller decides what a 400 means. Retrying blindly on status would double
+    the cost of every rejected request.
+    """
+    timeout = httpx.Timeout(REQUEST_TIMEOUT, connect=CONNECT_TIMEOUT)
+    last: Optional[BaseException] = None
+    for attempt in range(TRANSPORT_RETRIES + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as http:
+                return_value = await http.post(
+                    f"{API_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {_api_key()}",
+                             "Content-Type": "application/json"},
+                    json=payload,
+                )
+            break
+        except httpx.TransportError as exc:
+            last = exc
+            if attempt >= TRANSPORT_RETRIES:
+                raise
+            log.warning("field extraction transport failure (%s), retrying: %s",
+                        type(exc).__name__, exc or "connection dropped")
+            await asyncio.sleep(1.5 * (attempt + 1))
     if return_value.status_code >= 400:
         raise httpx.HTTPStatusError(
             return_value.text, request=return_value.request, response=return_value
@@ -322,6 +356,13 @@ async def complete(messages: list[Any], schema: dict[str, Any], schema_name: str
     return await _complete(messages, schema, schema_name, model=model)
 
 
+def _uses_temperature(model: str) -> bool:
+    if model in _NO_TEMPERATURE:
+        return False
+    lowered = model.lower()
+    return not any(marker in lowered for marker in _NO_TEMPERATURE_MARKERS)
+
+
 async def _complete(messages: list[Any], schema: dict[str, Any],
                     schema_name: str, model: Optional[str] = None) -> dict[str, Any]:
     """One completion, degrading gracefully across model families."""
@@ -330,15 +371,17 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
             "Field extraction isn't configured yet. Please contact your administrator."
         )
 
+    chosen = model or model_name()
     payload: dict[str, Any] = {
-        "model": model or model_name(),
+        "model": chosen,
         "messages": messages,
-        "temperature": 0,
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": schema_name, "strict": True, "schema": schema},
         },
     }
+    if _uses_temperature(chosen):
+        payload["temperature"] = 0
 
     for attempt in range(4):
         try:
@@ -350,6 +393,7 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
             if exc.response.status_code == 400 and "temperature" in payload \
                     and _unsupported(detail, "temperature"):
                 payload.pop("temperature")
+                _NO_TEMPERATURE.add(chosen)
                 continue
             if exc.response.status_code == 400 and _unsupported(
                 detail, "response_format", "json_schema"
@@ -373,7 +417,10 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
                 ) from exc
             raise ExtractionUnavailable("We couldn't read the fields from this document.") from exc
         except httpx.HTTPError as exc:
-            log.error("field extraction transport error: %s", exc)
+            # str(exc) is empty for a plain dropped connection; the class name is
+            # the only thing that says what happened.
+            log.error("field extraction transport error (%s): %s",
+                      type(exc).__name__, exc or "connection dropped")
             raise ExtractionUnavailable(
                 "We couldn't reach the field-extraction service. Please try again."
             ) from exc
@@ -463,9 +510,64 @@ async def extract_header(document: str) -> dict[str, Any]:
     return {"values": list(rows.values()), "usage": result.get("_usage", {})}
 
 
+def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    prompt = completion = 0
+    models: list[str] = []
+    for part in parts:
+        usage = part.get("_usage") or {}
+        prompt += usage.get("prompt_tokens") or 0
+        completion += usage.get("completion_tokens") or 0
+        if usage.get("model"):
+            models.append(usage["model"])
+    return {
+        "prompt_tokens": prompt or None,
+        "completion_tokens": completion or None,
+        "model": models[0] if models else model_name(),
+    }
+
+
+async def _extract_sections(document: str, form: dict[str, Any],
+                            header: dict[str, Any]) -> dict[str, Any]:
+    """One completion per CRF, in parallel — wall clock is the slowest section.
+
+    A visit with two CRFs was a single 70s call. Splitting keeps each prompt to
+    one block (which is how the page is printed) so two ~20s calls overlap.
+    """
+    sections = form.get("sections") or []
+    if len(sections) <= 1:
+        return await _complete(form_prompt(document, form, header), FORM_SCHEMA, "crf_form")
+
+    async def one(section: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        mini = {**form, "sections": [section]}
+        result = await _complete(form_prompt(document, mini, header), FORM_SCHEMA, "crf_form")
+        log.info("section %s (%s) read in %.1fs (%s value(s))",
+                 section.get("section_id"), section.get("name"),
+                 time.monotonic() - started, len(result.get("values") or []))
+        return result
+
+    gathered = await asyncio.gather(
+        *[one(section) for section in sections], return_exceptions=True
+    )
+    merged: list[dict[str, Any]] = []
+    usages: list[dict[str, Any]] = []
+    failed = 0
+    for section, item in zip(sections, gathered):
+        if isinstance(item, BaseException):
+            failed += 1
+            log.warning("section %s (%s) failed: %s",
+                        section.get("section_id"), section.get("name"), item)
+            continue
+        merged.extend(item.get("values") or [])
+        usages.append(item)
+    if not merged and failed:
+        raise ExtractionUnavailable("We couldn't read the fields from this document.")
+    return {"values": merged, "_usage": _merge_usage(usages)}
+
+
 async def extract_form(document: str, form: dict[str, Any],
                        header: dict[str, Any]) -> dict[str, Any]:
-    result = await _complete(form_prompt(document, form, header), FORM_SCHEMA, "crf_form")
+    result = await _extract_sections(document, form, header)
 
     valid = {
         (section["section_id"], (group or {}).get("group_id"), field["field_id"])

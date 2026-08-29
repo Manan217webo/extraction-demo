@@ -1201,13 +1201,40 @@ mark.current { background: var(--purple); color: #fff; }
   margin-bottom: 16px;
   overflow: hidden;
 }
-.crf-section > header {
+.crf-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   padding: 14px 18px;
   border-bottom: 1px solid var(--line);
   background: var(--soft);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
 }
-.crf-section > header h4 { margin: 0 0 3px; font-size: 15px; }
-.crf-section > header p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.55; }
+.crf-section > summary::-webkit-details-marker,
+.crf-section > summary::marker { display: none; content: none; }
+.crf-section:not([open]) > summary { border-bottom: 0; }
+.crf-section > summary:hover { background: var(--soft-2); }
+.crf-section > summary:focus-visible {
+  outline: 2px solid var(--purple);
+  outline-offset: -2px;
+}
+.crf-section > summary > div { flex: 1; min-width: 0; }
+.crf-section > summary h4 { margin: 0; font-size: 15px; }
+.crf-section > summary p { margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.55; }
+.crf-section > summary::after {
+  content: "";
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-right: 2px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 0.18s;
+}
+.crf-section[open] > summary::after { transform: rotate(45deg); }
 .crf-section .field-group {
   max-width: none;
   margin: 0;
@@ -1310,6 +1337,8 @@ mark.current { background: var(--purple); color: #fff; }
     background: #fff !important;
     height: auto !important;
   }
+  .crf-section > .crf-section-body { display: block !important; }
+  .crf-section > summary::after { display: none; }
   .doc-pages { padding: 0; display: block; }
   .sheet {
     width: 100%;
@@ -1409,3 +1438,11 @@ mark.current { background: var(--purple); color: #fff; }
   font-size: 12.5px;
 }
 .panel-busy.panel-busy-inline .mini-spin { width: 15px; height: 15px; border-width: 2px; }
+
+/* The same jump signal as a form field, for a box on the page. Scale rather than
+   background, so it reads on a box that is already tinted. */
+@keyframes boxFlash {
+  0%, 100% { transform: scale(1); }
+  30%      { transform: scale(1.06); }
+}
+.pdf-hl.is-flash { animation: boxFlash 0.55s ease 1; }

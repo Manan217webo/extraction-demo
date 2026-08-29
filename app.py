@@ -87,6 +87,7 @@ MODES: list[dict[str, Any]] = [
         "credits_per_page": 10,
         "speed": "One to two minutes",
         "accuracy": 3,
+        "recommended": True,
     },
     {
         "id": "maximum",
@@ -97,7 +98,6 @@ MODES: list[dict[str, Any]] = [
         "credits_per_page": 45,
         "speed": "Several minutes",
         "accuracy": 4,
-        "recommended": True,
     },
 ]
 
@@ -405,6 +405,9 @@ async def index() -> Response:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     stamp = _asset_stamp()
     html = _ASSET_REF.sub(rf'\1="\2?v={stamp}"', html)
+    # The same stamp on `window`, so a review saved by an older build is not
+    # restored as if it were current.
+    html = html.replace("<head>", f"<head><script>window.APP_BUILD={stamp!r};</script>", 1)
     return Response(
         content=html,
         media_type="text/html",
@@ -888,6 +891,11 @@ async def save_visit(job_id: str, request: VisitSaveRequest) -> dict[str, Any]:
         "values": sum(1 for c in body["crfs"] for f in c["fields"] if f["value"]),
         "images": sum(len(c["images"]) for c in body["crfs"]),
     }
+    log.info("visit save for %s: %s crop(s) received, %s image(s) attached, %s value(s)",
+             job_id, len(request.crops), counts["images"], counts["values"])
+    if request.crops and not counts["images"]:
+        log.warning("visit save for %s: crop keys did not match any field: %s",
+                    job_id, list(request.crops)[:20])
     if request.dry_run:
         log.info("visit save for %s: dry run, nothing sent", job_id)
         return {"sent": False, "dry_run": True, "counts": counts,

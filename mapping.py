@@ -139,6 +139,9 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
         "key": key,
         "field_id": field["field_id"],
         "label": field["label"],
+        # Names the row rather than holding entered data; the row's own values
+        # carry it into their boxes, so it is not boxed separately.
+        "row_name": bool(field.get("row_name")),
         "type": field.get("type", "text"),
         "value": value,
         "raw_value": raw,
@@ -167,11 +170,13 @@ def build_header(rows: list[dict[str, Any]],
     by_id = {row["field_id"]: row for row in rows}
     groups = []
     for group in cronos.HEADER_GROUPS:
-        built = [
-            _build_field(field, by_id.get(field["field_id"]), index,
-                         f"header.{group['group_id']}.{field['field_id']}")
-            for field in group["fields"]
-        ]
+        built = []
+        for field in group["fields"]:
+            item = _build_field(field, by_id.get(field["field_id"]), index,
+                                f"header.{group['group_id']}.{field['field_id']}")
+            if field["field_id"] == "visit_name" and item.get("value") not in (None, ""):
+                item["value"] = cronos.display_visit_name(item["value"])
+            built.append(item)
         groups.append({"group_id": group["group_id"], "name": group["name"], "fields": built})
     return {"groups": groups, "summary": summarise(groups)}
 
@@ -299,6 +304,8 @@ def highlights(*containers: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
     for container in containers:
         for path, field in iter_built(container):
+            if field.get("row_name"):
+                continue
             source = field.get("source") or {}
             # Values the parser could not place are carried with no rectangle:
             # the viewer draws nothing for them, and the locator is given the

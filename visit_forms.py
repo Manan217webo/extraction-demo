@@ -370,6 +370,10 @@ def _structured_group(container: dict[str, Any], cells: list[dict[str, Any]],
         built["label"] = heading or built["label"]
         if label_column:
             built["type"] = "text"
+            # It names the row rather than holding data a reviewer entered, so it
+            # is not boxed on the page in its own right — the row's values carry
+            # it into their own boxes instead.
+            built["row_name"] = True
         definitions.append(built)
         ids[column] = field_id
 
@@ -479,11 +483,14 @@ def build_crf(crf: dict[str, Any], forms: list[dict[str, Any]]) -> dict[str, Any
             heading = (label_field or {}).get("label") or names[lead - 1] or "Row"
             field_id = (label_field or {}).get("field_id") or _slug(heading, "ROWLABEL")
             naming = _describe(heading, field_id, label_field, None)
+            naming["row_name"] = True
             group_fields.append(naming)
             row_labels = [names[row[0]] for row in rows]
         elif label_field:
-            group_fields.append(_describe(label_field["label"], label_field["field_id"],
-                                          label_field, None))
+            borrowed = _describe(label_field["label"], label_field["field_id"],
+                                 label_field, None)
+            borrowed["row_name"] = True
+            group_fields.append(borrowed)
         by_column: dict[str, dict[str, Any]] = {}
         for column in columns:
             definition = _best_definition(column, grouped + plain)
@@ -642,6 +649,7 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
     by_section = {crf["section_id"]: crf for crf in edc["crfs"]}
     warnings: list[str] = []
     crfs: list[dict[str, Any]] = []
+    used_crops: set[str] = set()
 
     for section in form.get("sections") or []:
         meta = by_section.get(section["section_id"])
@@ -650,6 +658,7 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         address = meta["address"]
         values: dict[int, str] = {}
         images: list[dict[str, Any]] = []
+        images_by_index: dict[int, dict[str, Any]] = {}
 
         def place(field: dict[str, Any], key: str, addr: str, row: Optional[int]) -> None:
             index = address.get(addr)
@@ -660,15 +669,25 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 return
             if field.get("value") is not None:
                 values[index] = _as_text(field["value"])
-            crop = crops.get(key)
+            # The browser keys crops by field.key. The reconstructed address is
+            # the fallback when a payload was built without keys.
+            crop_key = field.get("key") or key
+            crop = crops.get(crop_key) or (crops.get(key) if key != crop_key else None)
             if crop and crop.get("base64Data"):
+                used_crops.add(crop_key)
+                if key != crop_key:
+                    used_crops.add(key)
                 slot = meta["fields"][index]
+                blob = {
+                    "fileName": f"{str(crop_key).replace('.', '_')}.png",
+                    "contentType": crop.get("contentType") or "image/png",
+                    "base64Data": crop["base64Data"],
+                }
+                images_by_index[index] = blob
                 images.append({
                     **({"field_id": slot["field_id"]} if slot.get("field_id") is not None else {}),
                     "fieldName": slot["fieldName"],
-                    "fileName": f"{key.replace('.', '_')}.png",
-                    "contentType": crop.get("contentType") or "image/png",
-                    "base64Data": crop["base64Data"],
+                    **blob,
                 })
 
         for field in section.get("fields") or []:
@@ -704,11 +723,15 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
             # own layout that is the whole record; where it sends bare names it is
             # the name alone. Either way the request mirrors the response, plus
             # the images, which is the shape this endpoint has always taken.
+            # Source crops are written onto the field as well as the images list:
+            # some EDC deployments read base64Data off the field, and a reviewer
+            # inspecting the JSON will see the image next to the value.
             "fields": [
                 {**(field.get("record") or {}),
                  **({"field_id": field["field_id"]} if field.get("field_id") is not None else {}),
                  "fieldName": field["fieldName"],
-                 "value": values.get(field["index"], field.get("value") or "")}
+                 "value": values.get(field["index"], field.get("value") or ""),
+                 **(images_by_index.get(field["index"]) or {})}
                 for field in meta["fields"]
             ],
             "images": images,
@@ -716,6 +739,15 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         if meta.get("crf_seq") is not None:
             crf["crf_seq"] = meta["crf_seq"]
         crfs.append(crf)
+
+    leftover = [key for key in crops if key not in used_crops and (crops[key] or {}).get("base64Data")]
+    if leftover:
+        sample = ", ".join(f"“{key}”" for key in leftover[:6])
+        more = f" and {len(leftover) - 6} more" if len(leftover) > 6 else ""
+        warnings.append(
+            f"{len(leftover)} source image{'' if len(leftover) == 1 else 's'} "
+            f"did not match an EDC field ({sample}{more}) and were not sent."
+        )
 
     payload = {
         "protocolNo": edc["protocolNo"],

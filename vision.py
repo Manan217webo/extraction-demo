@@ -75,7 +75,9 @@ class Span:
 
 
 GRID = 1000.0
-BATCH = 24
+# One page of a visit CRF is typically 15–40 fields. A single vision call per
+# page avoids a second round-trip that used to sit behind the first.
+BATCH = 48
 
 OPENAI_RULES = """You are shown one page of a scanned clinical case report form.
 
@@ -83,7 +85,21 @@ For each target you are given the printed label beside the value and the value
 itself, as already read from this page. Your only job is to say WHERE on this
 page that field sits. Do not re-read it and do not correct it.
 
-Return one rectangle that covers the label AND the value together, on the same
+Return TWO rectangles for each target, and they are joined afterwards:
+
+  - x0,y0,x1,y1      the value itself — the handwritten digits, the ticked
+                     option, the characters in the comb boxes, plus any unit
+                     printed immediately after them ("beats/min", "(mmHg)")
+  - lx0,ly0,lx1,ly1  the printed label this value answers to. In a table that is
+                     the row heading in the left-hand column ("Pulse rate"); on a
+                     line of prose it is the printed question before the value.
+                     Set label_found false, and the four numbers to 0, only when
+                     no such label is printed.
+
+Giving them separately is what lets a crop of the value be read on its own: the
+saved image shows "Pulse rate ... 088 beats/min", not a stray 088.
+
+Historic note, kept for the older single-rectangle behaviour: one rectangle that covers the label AND the value together, on the same
 row. Example: for Pulse rate 080 beats/min, the box starts at "Pulse rate" and
 ends after the handwritten 080 and "beats/min" — not the value alone, not the
 label alone.
@@ -101,10 +117,16 @@ where 0,0 is the top-left corner of the page and 1000,1000 the bottom-right.
 x0,y0 is the top-left of the rectangle and x1,y1 the bottom-right, so x1 > x0 and
 y1 > y0 always.
 
-Set found to false when the value is not visible on this page, when you are not
-sure which of several similar cells it is, or when the label appears more than
-once and you cannot tell them apart. A false is far more useful than a guess: a
-rectangle in the wrong row puts a clinical value against the wrong parameter."""
+Each target names the "section" it belongs to — the titled CRF block it was read
+from, such as VITAL SIGNS or PHYSICAL EXAMINATION. Find the target INSIDE that
+block only. Several blocks ask the same question, so the same label and the same
+value can appear more than once on the page; the section is what tells them
+apart. A box drawn in the wrong block is wrong even when it reads the same.
+
+Set found to false when the value is not visible inside that block, or when you
+cannot tell which of several cells within it is meant. A false is far more useful
+than a guess: a rectangle in the wrong row puts a clinical value against the
+wrong parameter."""
 
 OPENAI_SCHEMA = {
     "type": "object",
@@ -120,8 +142,14 @@ OPENAI_SCHEMA = {
                     "y0": {"type": "integer"},
                     "x1": {"type": "integer"},
                     "y1": {"type": "integer"},
+                    "label_found": {"type": "boolean"},
+                    "lx0": {"type": "integer"},
+                    "ly0": {"type": "integer"},
+                    "lx1": {"type": "integer"},
+                    "ly1": {"type": "integer"},
                 },
-                "required": ["id", "found", "x0", "y0", "x1", "y1"],
+                "required": ["id", "found", "x0", "y0", "x1", "y1",
+                             "label_found", "lx0", "ly0", "lx1", "ly1"],
                 "additionalProperties": False,
             },
         }
@@ -195,6 +223,20 @@ def _needles(value: Any, tokens: bool = False) -> list[str]:
 
     collapsed = _alnum(text)
     add(collapsed)
+
+    # A date is held as ISO but written on the page in the order the boxes under
+    # it ask for — "DD MMM YY" here, digits in comb boxes. Searching for
+    # 20260216 can never match a page reading 160226, so every ordering the
+    # form might use is offered.
+    iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if iso:
+        year, month, day = iso.groups()
+        short = year[2:]
+        for form in (day + month + short, day + month + year,
+                     short + month + day, year + month + day,
+                     month + day + short, month + day + year):
+            add(form)
+
     if collapsed.isdigit():
         stripped = collapsed.lstrip("0") or "0"
         add(stripped)
@@ -512,8 +554,15 @@ def _sane_grid(box: dict[str, Any]) -> Optional[dict[str, float]]:
 
 
 async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    # The sheet stacks several CRFs and they repeat each other's questions: two
+    # blocks ask whether an assessment was performed and two carry a date in the
+    # same format. Naming the block a target belongs to is what makes those
+    # tellable apart — without it the honest answer is to refuse, and the field
+    # ends up with no box at all.
     listing = [
-        {"id": t["id"], "label": t.get("locator") or t.get("label") or "",
+        {"id": t["id"],
+         "section": t.get("section") or "",
+         "label": t.get("locator") or t.get("label") or "",
          "value": str(t.get("raw") if t.get("raw") not in (None, "") else t.get("value"))}
         for t in targets
     ]
@@ -541,7 +590,22 @@ async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, d
     for box in data.get("boxes") or []:
         if not box.get("found"):
             continue
-        rect = _sane_grid(box)
+        # The label and the value are asked for separately and joined here, so a
+        # row-spanning box is arithmetic rather than something the model has to
+        # get right in one go. The label is only allowed to widen the box along
+        # the row: a label found on another line would drag the box across half
+        # the page, which is worse than the value alone.
+        merged = dict(box)
+        if box.get("label_found"):
+            joined = {**box, "x0": min(box["x0"], box["lx0"]),
+                      "y0": min(box["y0"], box["ly0"]),
+                      "x1": max(box["x1"], box["lx1"]),
+                      "y1": max(box["y1"], box["ly1"])}
+            if joined["y1"] - joined["y0"] <= 2.5 * max(box["y1"] - box["y0"], 1):
+                merged = joined
+            else:
+                log.info("openai label for %s ignored, not on the value's row", box.get("id"))
+        rect = _sane_grid(merged)
         if rect is None:
             log.info("openai box for %s rejected: %s", box.get("id"), box)
             continue

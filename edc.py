@@ -25,6 +25,8 @@ from typing import Any, Optional
 
 import httpx
 
+import cronos
+
 log = logging.getLogger("extraction.edc")
 
 DEFAULT_BASE_URL = "https://cronosedc.dev.cronos.ws"
@@ -215,6 +217,7 @@ async def _request(method: str, path: str, **kwargs: Any) -> Any:
 async def get_visit(protocol_no: str, screening_no: str,
                     visit_name: str) -> dict[str, Any]:
     """The CRFs configured for one subject visit, with any values already saved."""
+    visit_name = cronos.format_visit_name(visit_name)
     offline = fixtures()
     if offline:
         return _fixture_visit(offline, protocol_no, screening_no, visit_name)

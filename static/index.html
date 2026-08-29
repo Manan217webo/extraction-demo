@@ -97,7 +97,7 @@
             <span class="step-num">2</span>
             <div>
               <h2>Choose how carefully to read it</h2>
-              <p>Handwritten entries and tick boxes need Maximum Accuracy. More care costs more credits per page.</p>
+              <p>High Accuracy is the usual choice. Use Maximum Accuracy for handwriting and tick boxes. More care costs more credits per page.</p>
             </div>
           </div>
           <div class="modes" id="modes" role="radiogroup" aria-label="Extraction mode"></div>
@@ -191,8 +191,8 @@
           </div>
 
           <div class="vb-actions" id="vb-actions">
-            <button type="button" class="btn btn-quiet" id="copy-btn">Copy text</button>
-            <div class="menu-wrap">
+            <button type="button" class="btn btn-quiet hidden" id="copy-btn">Copy text</button>
+            <div class="menu-wrap hidden">
               <button type="button" class="btn btn-quiet" id="download-btn">
                 Download
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
@@ -216,13 +216,9 @@
           <button type="button" data-step="form" disabled>
             <b>2</b><span>Map to Cronos CRF</span>
           </button>
-          <span class="stepper-gap"></span>
-          <button type="button" data-step="extract" class="step-aside">
-            <span>Extracted text</span>
-          </button>
         </nav>
 
-        <div class="vb-row vb-tools" id="tools-extract">
+        <div class="vb-row vb-tools hidden" id="tools-extract">
           <div class="segmented" id="layout-toggle" role="group" aria-label="Layout">
             <button type="button" data-layout="split" class="active">Side by side</button>
             <button type="button" data-layout="extracted">Extracted only</button>
@@ -307,8 +303,7 @@
               </div>
               <div id="header-groups"></div>
               <div class="panel-foot">
-                <button type="button" class="btn btn-quiet" data-goto="extract">View extracted text</button>
-                <button type="button" class="btn btn-primary" id="header-confirm">
+                <button type="button" class="btn btn-primary" id="header-confirm" disabled>
                   Confirm and load the visit
                 </button>
               </div>

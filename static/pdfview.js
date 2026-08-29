@@ -45,6 +45,10 @@
       this.observer = null;
       this.renderToken = 0;
       this._pending = null;
+      // saveToEdc waits on this so it never posts empty crops while load() is
+      // still in flight — the constructor leaves a resolved promise so a click
+      // before load() is called just proceeds.
+      this.loaded = Promise.resolve();
 
       this._onResize = debounce(() => this.relayout(), 180);
       window.addEventListener("resize", this._onResize);
@@ -60,6 +64,11 @@
     }
 
     async load(data) {
+      this.loaded = this._load(data);
+      return this.loaded;
+    }
+
+    async _load(data) {
       const pdfjsLib = await whenPdfReady();
       if (this.doc) {
         await this.doc.destroy().catch(() => {});
@@ -261,9 +270,29 @@
           box.setAttribute("aria-label", box.title.replace(/\n/g, ", "));
           box.addEventListener("click", (event) => {
             event.preventDefault();
-            // Repeated clicks walk through the values sharing this region.
-            const index = items.findIndex((item) => item.key === this.focusKey);
-            this.onSelect(items[(index + 1) % items.length].key);
+            // The value whose own rectangle sits under the cursor, so one click
+            // lands on what was pointed at. Cycling to "the next one" meant the
+            // first click on a box selected its first entry and only the second
+            // reached the value actually clicked. Falls back to the nearest by
+            // horizontal distance when nothing contains the point exactly — a
+            // merged row box is wider than any single value inside it.
+            const bounds = box.getBoundingClientRect();
+            const px = rect.x + ((event.clientX - bounds.left) / bounds.width) * rect.w;
+            const py = rect.y + ((event.clientY - bounds.top) / bounds.height) * rect.h;
+            let hit = null;
+            let nearest = Infinity;
+            items.forEach((item) => {
+              (item.own || item.rects || []).forEach((r) => {
+                const inside = px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+                const centre = r.x + r.w / 2;
+                const distance = inside ? -1 : Math.abs(px - centre);
+                if (distance < nearest) {
+                  nearest = distance;
+                  hit = item;
+                }
+              });
+            });
+            this.onSelect((hit || items[0]).key);
           });
           page.overlay.append(box);
         });
@@ -309,11 +338,12 @@
       try {
         for (const item of items || []) {
           const rects = (item && item.rects) || [];
-          if (!item.page || !rects.length) continue;
+          const pageNumber = Number(item && item.page);
+          if (!item || !item.key || !pageNumber || !rects.length) continue;
 
-          let sheet = sheets.get(item.page);
+          let sheet = sheets.get(pageNumber);
           if (!sheet) {
-            const page = await this.doc.getPage(item.page);
+            const page = await this.doc.getPage(pageNumber);
             const viewport = page.getViewport({ scale });
             sheet = document.createElement("canvas");
             sheet.width = Math.ceil(viewport.width);
@@ -322,7 +352,7 @@
             context.fillStyle = "#ffffff";
             context.fillRect(0, 0, sheet.width, sheet.height);
             await page.render({ canvasContext: context, viewport }).promise;
-            sheets.set(item.page, sheet);
+            sheets.set(pageNumber, sheet);
           }
 
           const x0 = Math.max(0, Math.min(...rects.map((r) => r.x)) - padding);
@@ -357,10 +387,17 @@
       if (!scroll || !key) return;
       const box = this.container.querySelector(`.pdf-hl[data-key~="${cssEscape(key)}"]`);
       if (!box) return false;
-      const wrap = box.closest(".pdf-page");
+      // Measured against the scroller rather than summed from offsetTop, which
+      // is relative to the page wrapper and only agreed with the pane by luck.
+      const pane = this.container.getBoundingClientRect();
+      const rect = box.getBoundingClientRect();
       const target =
-        wrap.offsetTop + box.offsetTop - this.container.clientHeight / 2 + box.offsetHeight / 2;
-      this.container.scrollTo({ top: Math.max(target, 0), behavior: "smooth" });
+        this.container.scrollTop + (rect.top - pane.top)
+        - this.container.clientHeight / 2 + rect.height / 2;
+      glideTo(this.container, Math.max(target, 0));
+      box.classList.remove("is-flash");
+      void box.offsetWidth;
+      box.classList.add("is-flash");
       return true;
     }
   }
@@ -368,6 +405,38 @@
   function cssEscape(value) {
     return window.CSS && CSS.escape ? CSS.escape(value) : String(value).replace(/"/g, '\\"');
   }
+
+  /* Glide a scroller to a position, driving scrollTop ourselves each frame.
+
+     The browser's own smooth scroll is abandoned the moment anything else
+     touches the scroller — a page canvas finishing its paint is enough — which
+     read as the scroll "sometimes not working". Setting the value directly
+     every frame cannot be interrupted that way, and a new glide simply takes
+     over from the old one. Honours the reduced-motion preference by jumping. */
+  const glides = new WeakMap();
+  function glideTo(pane, top, duration = 380) {
+    const start = pane.scrollTop;
+    const distance = top - start;
+    if (Math.abs(distance) < 1) return;
+    const reduce = window.matchMedia
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce) {
+      pane.scrollTop = top;
+      return;
+    }
+    const token = {};
+    glides.set(pane, token);
+    const began = performance.now();
+    const ease = (t) => 1 - Math.pow(1 - t, 3);
+    const step = (now) => {
+      if (glides.get(pane) !== token) return;
+      const t = Math.min((now - began) / duration, 1);
+      pane.scrollTop = start + distance * ease(t);
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  window.glideTo = glideTo;
 
   function debounce(fn, wait) {
     let timer = null;

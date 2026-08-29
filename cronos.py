@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional, Protocol
 
@@ -35,14 +36,36 @@ HEADER_GROUPS: list[dict[str, Any]] = [
             {"field_id": "screening_no", "label": "Screening No.", "type": "text",
              "required": True,
              "description": "The subject's screening number, digits only."},
-            {"field_id": "visit_name", "label": "Visit name", "type": "text",
+            {"field_id": "visit_name", "label": "Visit", "type": "text",
              "required": True,
-             "description": "The visit as the EDC names it, e.g. \"Visit 5\"."},
+             "description": "The visit number only, digits (e.g. 5). Do not return "
+                            "the word Visit or a schedule title."},
         ],
     },
 ]
 
 HEADER_FIELD_IDS = [f["field_id"] for g in HEADER_GROUPS for f in g["fields"]]
+
+# Numbered visits are stored in the EDC as "Visit N". The header field is just
+# the number — the label already says Visit — so "5" and "Visit 5" both mean
+# the same lookup.
+_VISIT_NUMBER = re.compile(r"(?:visit\s+)?(\d+)", re.I)
+
+
+def format_visit_name(value: Optional[str]) -> str:
+    """What GetVisitCRFData expects: 'Visit 5' from an entered '5'."""
+    text = (value or "").strip()
+    match = _VISIT_NUMBER.fullmatch(text)
+    return f"Visit {int(match.group(1))}" if match else text
+
+
+def display_visit_name(value: Optional[str]) -> Optional[str]:
+    """What the header input shows: '5' when the value is a numbered visit."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = _VISIT_NUMBER.fullmatch(text)
+    return str(int(match.group(1))) if match else text
 
 
 def header_field(field_id: str) -> Optional[dict[str, Any]]:

@@ -110,12 +110,14 @@ const state = {
   mappingReady: false,
   visit: null,
   unsaveable: [],
+  edcSaved: false,
   fileBytes: null,
   savedName: null,
+  bytesDropped: false,
   split: 50,
   refined: null,
   cronos: null,
-  step: "extract",
+  step: "header",
   pdf: null,
   header: null,
   forms: [],
@@ -364,6 +366,13 @@ async function runExtraction() {
   if (!state.file) return;
   hideError();
   els.runBtn.disabled = true;
+  // The old review goes first. Until the new parse finishes and saves, a
+  // refresh would otherwise bring the previous document's values back.
+  resetMapping();
+  state.fileBytes = null;
+  state.savedName = null;
+  state.bytesDropped = false;
+  clearSession();
   startProcessing();
 
   const body = new FormData();
@@ -436,16 +445,20 @@ async function pollOnce(jobId) {
     await new Promise((resolve) => setTimeout(resolve, 260));
     stopProcessing();
 
-    showResult(data, header ? "header" : "extract");
+    // Confirm header is the only landing. The raw markdown dump is not a step.
+    showResult(data, "header");
+    enableStep("header");
     if (header) {
       state.header = header;
       renderHeader(header);
-      enableStep("header");
       enableStep("form");
-      setStep("header");
       saveSessionNow();
     } else if (headerError) {
-      showError(`The document was read, but the header couldn't be matched. ${headerError}`);
+      els.headerConfirm.disabled = true;
+      inlineNotice(els.headerGroups, headerError, "warn", {
+        label: "Try matching the header again",
+        onClick: loadHeader,
+      });
     }
     refreshCredits(true);
     els.runBtn.disabled = false;
@@ -547,7 +560,7 @@ function showResult(data, landing, options = {}) {
   setFormat("formatted");
   setLayout("split");
   clearSearch();
-  if (!options.deferStep) setStep(landing || "extract");
+  if (!options.deferStep) setStep(landing || "header");
   els.viewer.classList.remove("hidden");
   document.body.classList.add("viewing");
   els.extractedScroll.scrollTop = 0;
@@ -760,6 +773,7 @@ function storeAction(mode, run) {
 }
 
 let saveTimer = null;
+let savingToEdc = false;
 
 /* Debounced: a reviewer typing through a form would otherwise write the whole
    snapshot on every keystroke. */
@@ -783,12 +797,18 @@ async function writeSession() {
   if (!state.result) return;
   const snapshot = {
     savedAt: Date.now(),
+    // Which document and which build produced this. A snapshot is only ever
+    // restored for the same job, and never from an older build: a mapping
+    // saved by yesterday's code shows yesterday's values.
+    jobId: state.result.job_id,
+    build: window.APP_BUILD || null,
     startedAt: state.startedAt,
     result: state.result,
     header: state.header || null,
     payload: state.payload || null,
     visit: state.visit || null,
     unsaveable: state.unsaveable || [],
+    edcSaved: Boolean(state.edcSaved),
     step: state.step,
     filename: state.file ? state.file.name : state.savedName || null,
     bytes: state.fileBytes || null,
@@ -797,9 +817,11 @@ async function writeSession() {
     await storeAction("readwrite", (store) => store.put(snapshot, STORE_KEY));
   } catch (error) {
     // The PDF bytes are the usual quota failure. Keep the review even if the
-    // original file cannot be stored.
+    // original file cannot be stored — but record that it was dropped, so a
+    // restore can say the file was not kept rather than blaming the browser.
     if (!snapshot.bytes) throw error;
     snapshot.bytes = null;
+    snapshot.bytesDropped = true;
     await storeAction("readwrite", (store) => store.put(snapshot, STORE_KEY));
   }
 }
@@ -819,8 +841,8 @@ function clearSession() {
 /* Restore a review that was in progress, without touching the parser.
 
    showResult() wipes mapping state (it is also the entry from a fresh extract),
-   so header, visit and form have to be put back afterwards. Landing on the
-   extracted-text pane is the fallback only when nothing has been mapped yet. */
+   so header, visit and form have to be put back afterwards. Confirm header is
+   the landing whenever the CRF has not been mapped yet. */
 async function restoreSession() {
   let saved = null;
   try {
@@ -829,16 +851,26 @@ async function restoreSession() {
     console.warn("no session restored", error);
   }
   if (!saved || !saved.result) return false;
+  // A snapshot that does not name its document is from before this check and
+  // cannot be trusted to belong to anything in particular.
+  if (!saved.jobId || saved.jobId !== saved.result.job_id) return false;
+  if (window.APP_BUILD && saved.build && saved.build !== window.APP_BUILD) {
+    // The code has moved on since this was saved. The parsed document is still
+    // good, but the mapping is whatever the old code made of it.
+    saved.payload = null;
+    saved.visit = null;
+    saved.step = "header";
+  }
 
   state.startedAt = saved.startedAt || Date.now();
   state.fileBytes = saved.bytes || null;
+  state.bytesDropped = Boolean(saved.bytesDropped);
   state.savedName = saved.filename || null;
   state.unsaveable = saved.unsaveable || [];
+  state.edcSaved = Boolean(saved.edcSaved);
 
   const landing =
-    saved.step === "form" && saved.payload ? "form"
-      : saved.header ? "header"
-        : "extract";
+    saved.step === "form" && saved.payload ? "form" : "header";
 
   state.header = saved.header || null;
   state.payload = saved.payload || null;
@@ -846,15 +878,16 @@ async function restoreSession() {
 
   showResult(saved.result, landing, { preserveMapping: true, deferStep: true });
 
+  enableStep("header");
   if (state.header) {
     renderHeader(state.header);
-    enableStep("header");
     enableStep("form");
   }
   if (state.payload) {
     renderForm(state.payload);
     els.formPicker.classList.add("hidden");
     els.formBody.classList.remove("hidden");
+    if (state.edcSaved) markSavedToEdc();
   }
 
   setStep(landing);
@@ -870,21 +903,30 @@ function showOriginal() {
     state.pdf = null;
   }
   if (!state.file && !state.fileBytes) {
+    els.originalEmpty.textContent = state.bytesDropped
+      ? "The original file wasn't kept when this review was saved — the browser " +
+        "ran out of storage for it. Upload the document again to see it here."
+      : "The original file isn't available for this review.";
     els.originalEmpty.classList.remove("hidden");
     return;
   }
   els.originalEmpty.classList.add("hidden");
   state.pdf = new PdfView(els.pdfScroll, { onSelect: (key) => selectField(key, "pdf") });
   // Held on to after the first read: a restored session has the bytes but no
-  // File behind them.
-  (state.fileBytes
+  // File behind them. Keep the promise on the viewer so Save to EDC can wait
+  // for the pages before cutting crops, instead of posting an empty images list.
+  state.pdf.loaded = (state.fileBytes
     ? Promise.resolve(state.fileBytes)
     : state.file.arrayBuffer().then((bytes) => (state.fileBytes = bytes)))
     .then((bytes) => state.pdf.load(bytes))
     .catch((error) => {
       console.warn("original document could not be rendered", error);
-      els.originalEmpty.textContent =
-        "We couldn't display the original file in this browser.";
+      const viewer = /viewer|too long|unavailable/i.test(String(error && error.message));
+      els.originalEmpty.textContent = viewer
+        ? "The document viewer didn't load. This needs a current version of " +
+          "Chrome, Edge, Firefox or Safari; try refreshing, or a newer browser."
+        : "We couldn't read this PDF. It may be damaged or password-protected — " +
+          "try opening it in another app first.";
       els.originalEmpty.classList.remove("hidden");
     });
 }
@@ -903,14 +945,18 @@ function resetMapping() {
   state.payload = null;
   state.forms = [];
   state.selectedKey = null;
+  state.edcSaved = false;
+  savingToEdc = false;
   els.headerGroups.innerHTML = "";
   els.formSections.innerHTML = "";
   els.formList.innerHTML = "";
   els.formBody.classList.add("hidden");
   els.formPicker.classList.remove("hidden");
+  els.sendCronos.disabled = false;
+  els.sendCronos.textContent = "Save to EDC";
   setHighlights([]);
   [...els.stepper.querySelectorAll("button")].forEach((button) => {
-    button.disabled = button.dataset.step !== "extract";
+    button.disabled = true;
     button.classList.remove("done");
   });
 }
@@ -921,6 +967,7 @@ function enableStep(step) {
 }
 
 function setStep(step) {
+  if (step === "extract") step = "header";
   state.step = step;
   saveSession();
   [...els.stepper.querySelectorAll("button")].forEach((button) => {
@@ -993,6 +1040,7 @@ function inlineNotice(container, text, kind = "warn", action = null) {
     notice.appendChild(button);
   }
   container.prepend(notice);
+  return notice;
 }
 
 /* -------------------------------------------------------------- field inputs */
@@ -1084,7 +1132,9 @@ function renderField(field, { compact = false } = {}) {
   meta.className = "field-meta";
 
   const source = field.source || {};
-  if (source.anchored) {
+  // Header confirm is only the three identifiers — a page chip there is noise.
+  // On the CRF review the chip jumps the original to the box for that value.
+  if (source.anchored && !String(field.key || "").startsWith("header.")) {
     const locate = document.createElement("button");
     locate.type = "button";
     locate.className = "locate";
@@ -1128,7 +1178,13 @@ function renderField(field, { compact = false } = {}) {
   };
   control.node.addEventListener("change", commit);
   control.node.addEventListener("blur", commit, true);
+  // Both paths: keyboard focus reaches the control, a mouse click may land on
+  // the label or the cell padding and never focus anything.
   row.addEventListener("focusin", () => selectField(field.key, "form", { scroll: true }));
+  row.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    if (state.selectedKey !== field.key) selectField(field.key, "form", { scroll: true });
+  });
 
   // In a table the column heading already says what the field is.
   if (compact) row.append(wrap);
@@ -1162,20 +1218,35 @@ function selectField(key, origin, { scroll = true } = {}) {
   );
   const row = els.extractedScroll.querySelector(`.field[data-key="${cssEscape(key)}"]`);
   if (row) {
+    const fold = row.closest("details.crf-section");
+    const opened = fold && !fold.open;
+    if (opened) fold.open = true;
     row.classList.add("is-selected");
     if (origin === "pdf") {
-      // Computed against the pane rather than scrollIntoView, whose smooth
-      // behaviour does not reliably drive this nested scroller.
-      const pane = els.extractedScroll;
-      const target =
-        row.offsetTop - pane.clientHeight / 2 + row.offsetHeight / 2;
-      // Instant, not smooth: smooth scrolling is a no-op on this pane in Chrome.
-      // The flash below is what signals the jump.
-      pane.scrollTop = Math.max(target, 0);
-      // A scroll alone is easy to miss on a long form.
-      row.classList.remove("is-flash");
-      void row.offsetWidth;
-      row.classList.add("is-flash");
+      // Measured against the pane rather than read off offsetTop: inside a
+      // table the offset parent is the cell, not the scroller, so the field
+      // barely moved or landed somewhere else entirely. Rectangles are relative
+      // to the viewport, which holds however deeply the field is nested.
+      //
+      // Opening a fold lays out on the next frame, and measuring before that
+      // lands on where the field was while its section was still collapsed.
+      const jump = () => {
+        const pane = els.extractedScroll;
+        const paneBox = pane.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        const target =
+          pane.scrollTop + (rowBox.top - paneBox.top)
+          - pane.clientHeight / 2 + rowBox.height / 2;
+        // Driven by hand rather than `behavior: "smooth"`, which Chrome ignores
+        // on this nested pane. The flash below marks the arrival.
+        window.glideTo(pane, Math.max(target, 0));
+        // A scroll alone is easy to miss on a long form.
+        row.classList.remove("is-flash");
+        void row.offsetWidth;
+        row.classList.add("is-flash");
+      };
+      if (opened) requestAnimationFrame(jump);
+      else jump();
     }
   }
   if (state.pdf) state.pdf.focus(key, { scroll: scroll && origin !== "pdf" });
@@ -1185,12 +1256,58 @@ function cssEscape(value) {
   return window.CSS && CSS.escape ? CSS.escape(value) : String(value).replace(/"/g, '\\"');
 }
 
+/* One box per printed row.
+
+   A row's values sit side by side — the parameter, the reading, the evaluation —
+   and boxing each of them separately litters the row with fragments that mean
+   nothing on their own. Merging them gives a box a reviewer can read, and a crop
+   saved against any value in the row shows the whole row it came from.
+
+   The merge is refused when the union comes out far taller than the boxes it is
+   made of: that means the values are not actually side by side, and merging
+   would swallow the rows above and below. */
+function mergeRowBoxes(items) {
+  const rows = new Map();
+  items.forEach((item) => {
+    const parts = String(item.key || "").split(".");
+    if (parts.length < 4 || !item.page || !(item.rects || []).length) return;
+    const key = `${parts.slice(0, 3).join(".")}|${item.page}`;
+    if (!rows.has(key)) rows.set(key, []);
+    rows.get(key).push(item);
+  });
+
+  rows.forEach((group) => {
+    if (group.length < 2) return;
+    const rects = group.flatMap((item) => item.rects);
+    const top = Math.min(...rects.map((r) => r.y));
+    const bottom = Math.max(...rects.map((r) => r.y + r.h));
+    const tallest = Math.max(...rects.map((r) => r.h));
+    if (bottom - top > tallest * 1.8) return;
+    const merged = {
+      x: Math.min(...rects.map((r) => r.x)),
+      y: top,
+      w: Math.max(...rects.map((r) => r.x + r.w)) - Math.min(...rects.map((r) => r.x)),
+      h: bottom - top,
+    };
+    group.forEach((item) => {
+      // The value's own rectangle is kept beside the merged one, so a click on
+      // the row box can still tell which value inside it was meant.
+      item.own = item.rects;
+      item.rects = [merged];
+    });
+  });
+  return items;
+}
+
 function collectHighlights(container) {
   const out = [];
-  const walk = (fields, groupName, instance) => {
+  const walk = (fields, groupName, instance, sectionName) => {
     (fields || []).forEach((field) => {
       const source = field.source || {};
-      if (!source.anchored || !(source.rects || []).length) return;
+      // A value the layout could not place is carried with no rectangle: the
+      // viewer draws nothing for it, and the locator still gets to look for it.
+      if (!source.page) return;
+      if (!source.anchored && !(source.rects || []).length && field.value == null) return;
       out.push({
         key: field.key,
         label: field.label,
@@ -1199,6 +1316,9 @@ function collectHighlights(container) {
         locator: source.locator,
         evidence: source.evidence,
         group: groupName,
+        // The titled CRF block, on its own. Two blocks ask the same questions,
+        // and the locator needs to know which one is meant.
+        section: sectionName || groupName,
         instance,
         issues: field.issues || [],
         page: source.page,
@@ -1206,12 +1326,12 @@ function collectHighlights(container) {
       });
     });
   };
-  (container.groups || []).forEach((group) => walk(group.fields, group.name, null));
+  (container.groups || []).forEach((group) => walk(group.fields, group.name, null, group.name));
   (container.sections || []).forEach((section) => {
-    walk(section.fields, section.name, null);
+    walk(section.fields, section.name, null, section.name);
     (section.groups || []).forEach((group) =>
       (group.instances || []).forEach((instance) =>
-        walk(instance.fields, `${section.name} — ${group.label}`, instance.instance)
+        walk(instance.fields, `${section.name} — ${group.label}`, instance.instance, section.name)
       )
     );
   });
@@ -1222,7 +1342,7 @@ function refreshHighlights() {
   // Header confirm is just the three identifiers — boxing them on the page
   // adds noise. Boxes belong on the CRF review, where each value is checked.
   if (state.step === "form" && state.payload) {
-    state.payload.highlights = collectHighlights(state.payload.form);
+    state.payload.highlights = mergeRowBoxes(collectHighlights(state.payload.form));
     setHighlights(state.payload.highlights);
   } else {
     setHighlights([]);
@@ -1252,6 +1372,18 @@ async function loadHeader() {
   }
 }
 
+function visitNumberForDisplay(value) {
+  const text = String(value ?? "").trim();
+  const match = /^(?:visit\s+)?(\d+)$/i.exec(text);
+  return match ? String(Number(match[1])) : text;
+}
+
+function edcVisitName(value) {
+  const text = String(value ?? "").trim();
+  const match = /^(?:visit\s+)?(\d+)$/i.exec(text);
+  return match ? `Visit ${Number(match[1])}` : text;
+}
+
 function renderHeader(data) {
   els.headerConfirm.disabled = false;
   els.headerGroups.innerHTML = "";
@@ -1273,6 +1405,11 @@ function renderHeader(data) {
   }
 
   (data.header.groups || []).forEach((group) => {
+    group.fields.forEach((field) => {
+      if (field.field_id === "visit_name" && field.value != null && field.value !== "") {
+        field.value = visitNumberForDisplay(field.value);
+      }
+    });
     const filled = group.fields.filter((field) => field.value !== null).length;
     els.headerGroups.appendChild(
       renderFieldGroup(group.name, group.fields, `${filled} of ${group.fields.length} read`)
@@ -1325,22 +1462,28 @@ function renderForm(payload) {
     );
   }
   (form.sections || []).forEach((section) => {
-    const card = document.createElement("section");
+    const card = document.createElement("details");
     card.className = "crf-section";
+    card.open = true;
 
-    const head = document.createElement("header");
+    const head = document.createElement("summary");
+    const intro = document.createElement("div");
     const title = document.createElement("h4");
     title.textContent = section.name;
-    head.appendChild(title);
+    intro.appendChild(title);
     if (section.description) {
       const note = document.createElement("p");
       note.textContent = section.description;
-      head.appendChild(note);
+      intro.appendChild(note);
     }
+    head.appendChild(intro);
     card.appendChild(head);
 
+    const body = document.createElement("div");
+    body.className = "crf-section-body";
+
     if ((section.fields || []).length) {
-      card.appendChild(renderFieldGroup(null, section.fields));
+      body.appendChild(renderFieldGroup(null, section.fields));
     }
 
     (section.groups || []).forEach((group) => {
@@ -1351,20 +1494,20 @@ function renderForm(payload) {
       const count = document.createElement("span");
       count.textContent = `${(group.instances || []).length} recorded`;
       groupHead.append(label, count);
-      card.appendChild(groupHead);
+      body.appendChild(groupHead);
 
       if (!(group.instances || []).length) {
         const empty = document.createElement("p");
         empty.className = "crf-empty";
         empty.textContent = `No ${group.row_label.toLowerCase()} rows were found on the document.`;
-        card.appendChild(empty);
+        body.appendChild(empty);
         return;
       }
       const columns = group.field_definitions || [];
       // These rows came off a printed table, so they read as one. Past about six
       // columns a table stops fitting the pane and stacked rows are clearer.
       if (columns.length > 1 && columns.length <= 6) {
-        card.appendChild(renderGroupTable(group, columns));
+        body.appendChild(renderGroupTable(group, columns));
       } else {
         group.instances.forEach((instance) => {
           const block = document.createElement("div");
@@ -1373,15 +1516,16 @@ function renderForm(payload) {
           heading.textContent = `${group.row_label} ${instance.instance}`;
           block.appendChild(heading);
           block.appendChild(renderFieldGroup(null, instance.fields));
-          card.appendChild(block);
+          body.appendChild(block);
         });
       }
     });
 
+    card.appendChild(body);
     els.formSections.appendChild(card);
   });
 
-  payload.highlights = collectHighlights(payload.form);
+  payload.highlights = mergeRowBoxes(collectHighlights(payload.form));
   setHighlights(payload.highlights);
 }
 
@@ -1394,7 +1538,10 @@ function renderGroupTable(group, columns) {
   // The EDC has no slot for a row's own name, so the definition supplies one.
   // It names the row rather than being a column of its own — showing it twice,
   // once as "Parameter 1" and again as "Pulse rate", says nothing extra.
-  const naming = columns.find((column) => column.edc_index === null) || null;
+  const naming =
+    columns.find((column) => column.row_name) ||
+    columns.find((column) => column.edc_index === null) ||
+    null;
   if (naming) columns = columns.filter((column) => column !== naming);
 
   const head = document.createElement("thead");
@@ -1457,7 +1604,7 @@ async function loadVisit() {
   const missing = [
     ["protocol_no", "Protocol No."],
     ["screening_no", "Screening No."],
-    ["visit_name", "Visit name"],
+    ["visit_name", "Visit"],
   ].filter(([id]) => !String(header[id] || "").trim());
 
   if (missing.length) {
@@ -1483,7 +1630,7 @@ async function loadVisit() {
       body: JSON.stringify({
         protocol_no: header.protocol_no,
         screening_no: header.screening_no,
-        visit_name: header.visit_name,
+        visit_name: edcVisitName(header.visit_name),
       }),
     });
     state.visit = visit.form;
@@ -1491,6 +1638,9 @@ async function loadVisit() {
     renderVisitSummary(visit.form, header);
 
     busy("Reading the document into the Cronos CRFs… this can take a minute.");
+    // Render page screenshots while the model reads the form, so box placement
+    // does not wait on canvas work after the values are already on screen.
+    const pageImages = prefetchPageImages();
     const payload = await api(`/api/documents/${state.result.job_id}/visit/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1501,7 +1651,7 @@ async function loadVisit() {
     saveSessionNow();
     els.extractedScroll.scrollTop = 0;
     // Not awaited: the review is usable while the boxes are still being placed.
-    refineBoxes();
+    refineBoxes(pageImages);
   } catch (error) {
     els.formSections.innerHTML = "";
     inlineNotice(els.formSections, error.message, "warn", {
@@ -1582,40 +1732,47 @@ function renderVisitSummary(form, header) {
 
    Misses keep the interpolated box. */
 
-async function refineBoxes() {
+function prefetchPageImages() {
+  if (!state.pdf) return Promise.resolve({});
+  const ready = state.pdf.loaded || Promise.resolve();
+  return ready.then(() => (state.pdf && state.pdf.doc ? state.pdf.pageImages() : {}))
+    .catch((error) => {
+      console.warn("page images not ready", error);
+      return {};
+    });
+}
+
+async function refineBoxes(pagesPromise) {
   if (!state.payload || !state.pdf) return;
   const targets = (state.payload.highlights || [])
     .filter((item) => item.page && item.value !== null && item.value !== undefined
       && String(item.value) !== "")
     .map((item) => ({
       id: item.key, key: item.key, page: item.page,
+      // The CRF block this value was read from. Two blocks on this sheet ask the
+      // same questions, so without it the page cannot say which one is meant.
+      section: item.section || item.group,
       label: item.label, locator: item.locator, evidence: item.evidence,
       value: item.value, raw: item.raw, rects: item.rects,
     }));
   if (!targets.length) return;
 
-  const done = working(els.formSections, "Connecting with Cronos… placing boxes on the page");
+  const done = working(els.formSections, "Placing boxes on the page…");
   try {
-    const pages = await state.pdf.pageImages();
+    const pages = pagesPromise
+      ? await pagesPromise
+      : await prefetchPageImages();
+    const images = pages && Object.keys(pages).length ? pages : await state.pdf.pageImages();
     const data = await api(`/api/documents/${state.result.job_id}/locate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pages, targets }),
+      body: JSON.stringify({ pages: images, targets }),
     });
     const located = data.located || {};
     const placed = applyLocated(located);
     state.refined = { model: data.model, placed, requested: targets.length };
     refreshHighlights();
     saveSessionNow();
-    if (placed) {
-      inlineNotice(
-        els.formSections,
-        `${placed} of ${targets.length} boxes were placed by reading the page. ` +
-          "The rest keep the position worked out from the document's layout, " +
-          "which is approximate.",
-        "info"
-      );
-    }
   } catch (error) {
     console.warn("boxes not refined", error);
   } finally {
@@ -1690,51 +1847,101 @@ function filenameFrom(response, kind) {
   return match ? match[1] : `case-report-form.${kind}`;
 }
 
+/* Filled fields that still have a box on the page. Highlights can lag behind
+   an in-flight refine, so the crop list is read off the form itself. */
+function cropTargets(form) {
+  const items = [];
+  const take = (field) => {
+    if (!field || !field.key) return;
+    if (field.value === null || field.value === undefined || field.value === "") return;
+    const source = field.source || {};
+    const rects = source.rects || [];
+    if (!source.page || !rects.length) return;
+    items.push({
+      key: field.key,
+      page: source.page,
+      rects,
+      value: field.value,
+      label: field.label,
+    });
+  };
+  (form.sections || []).forEach((section) => {
+    (section.fields || []).forEach(take);
+    (section.groups || []).forEach((group) =>
+      (group.instances || []).forEach((instance) =>
+        (instance.fields || []).forEach(take)
+      )
+    );
+  });
+  return items;
+}
+
+function markSavedToEdc() {
+  state.edcSaved = true;
+  savingToEdc = false;
+  els.sendCronos.disabled = true;
+  els.sendCronos.textContent = "Saved to Cronos";
+  els.formSections.querySelectorAll("[data-edc-saved]").forEach((el) => el.remove());
+  const notice = inlineNotice(
+    els.formSections,
+    "Your data has been saved in Cronos",
+    "info"
+  );
+  notice.dataset.edcSaved = "1";
+}
+
 async function saveToEdc() {
-  if (!state.payload) return;
+  if (!state.payload || savingToEdc || state.edcSaved) return;
+  savingToEdc = true;
   const button = els.sendCronos;
-  const original = button.textContent;
   button.disabled = true;
   try {
     // Every value that was located on the page travels with a crop of the mark it
     // was read from, so the EDC keeps the source beside the datum.
-    const located = (state.payload.highlights || []).filter(
-      (item) => item.value !== null && item.value !== undefined && item.value !== ""
-        && (item.rects || []).length
-    );
+    const located = cropTargets(state.payload.form || {});
+    if (state.pdf && state.pdf.loaded) {
+      button.textContent = "Preparing the original page…";
+      await state.pdf.loaded;
+    }
     button.textContent = located.length ? "Cutting source images…" : "Saving…";
-    const crops = state.pdf ? await state.pdf.cropRegions(located) : {};
+    if (located.length && (!state.pdf || !state.pdf.doc)) {
+      throw new Error(
+        "The original document isn't available, so source images couldn't be attached."
+      );
+    }
+    const crops = located.length ? await state.pdf.cropRegions(located) : {};
+    if (located.length && !Object.keys(crops).length) {
+      throw new Error("Source images couldn't be cut from the page. Try again.");
+    }
 
     button.textContent = "Saving to the EDC…";
     const result = await api(`/api/documents/${state.result.job_id}/visit/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload: state.payload, crops }),
+      body: JSON.stringify({
+        payload: {
+          header: state.payload.header,
+          form: state.payload.form,
+        },
+        crops,
+      }),
     });
 
-    button.textContent = "Saved to the EDC";
-    const counts = result.counts || {};
-    inlineNotice(
-      els.formSections,
-      `The EDC accepted ${counts.values} value${counts.values === 1 ? "" : "s"} ` +
-        `across ${counts.fields} field${counts.fields === 1 ? "" : "s"}, with ` +
-        `${counts.images} source image${counts.images === 1 ? "" : "s"} attached.`,
-      "info"
-    );
     (result.warnings || []).forEach((warning) => inlineNotice(els.formSections, warning));
+    markSavedToEdc();
     els.extractedScroll.scrollTop = 0;
-    setTimeout(() => {
-      button.textContent = original;
-      button.disabled = false;
-    }, 2600);
+    saveSessionNow();
   } catch (error) {
+    if (state.edcSaved) return;
     inlineNotice(els.formSections, error.message, "warn", {
       label: "Try again",
       onClick: saveToEdc,
     });
     els.extractedScroll.scrollTop = 0;
-    button.textContent = original;
+    button.textContent = "Save to EDC";
     button.disabled = false;
+  } finally {
+    if (!state.edcSaved) savingToEdc = false;
   }
 }
 
@@ -1759,11 +1966,6 @@ function wireMapping() {
     if (step === "header") loadHeader();
     else if (step === "form") state.payload ? setStep("form") : loadVisit();
     else setStep(step);
-  });
-
-  els.panelHeader.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-goto]");
-    if (button) setStep(button.dataset.goto);
   });
 }
 
@@ -2037,6 +2239,9 @@ document.addEventListener("keydown", (event) => {
 
     // Last, so a restored review lands on top of a fully wired page.
     if (!restored) await restoreSession();
+    if (state.result && !state.header && state.mappingReady) {
+      loadHeader();
+    }
   } catch {
     if (restored) return;
     els.setupError.textContent =
