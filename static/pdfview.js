@@ -45,6 +45,8 @@
       this.observer = null;
       this.renderToken = 0;
       this._pending = null;
+      this._pageImages = {};
+      this._pageImagePending = {};
       // saveToEdc waits on this so it never posts empty crops while load() is
       // still in flight — the constructor leaves a resolved promise so a click
       // before load() is called just proceeds.
@@ -60,6 +62,8 @@
       if (this.doc) this.doc.destroy().catch(() => {});
       this.doc = null;
       this.pages.clear();
+      this._pageImages = {};
+      this._pageImagePending = {};
       this.container.innerHTML = "";
     }
 
@@ -74,6 +78,8 @@
         await this.doc.destroy().catch(() => {});
         this.doc = null;
       }
+      this._pageImages = {};
+      this._pageImagePending = {};
       // pdf.js takes ownership of the buffer it is handed, so give it a copy.
       const task = pdfjsLib.getDocument({ data: data.slice(0) });
       this.doc = await task.promise;
@@ -270,29 +276,26 @@
           box.setAttribute("aria-label", box.title.replace(/\n/g, ", "));
           box.addEventListener("click", (event) => {
             event.preventDefault();
-            // The value whose own rectangle sits under the cursor, so one click
-            // lands on what was pointed at. Cycling to "the next one" meant the
-            // first click on a box selected its first entry and only the second
-            // reached the value actually clicked. Falls back to the nearest by
-            // horizontal distance when nothing contains the point exactly — a
-            // merged row box is wider than any single value inside it.
+            // A click inside a value's own rectangle selects that value, so one
+            // click lands on what was pointed at. A click anywhere else in the
+            // row — on the row label, in the gap between columns — goes to the
+            // row's first value in reading order: the label names the row, and
+            // the natural place to land from it is the row's first entry.
             const bounds = box.getBoundingClientRect();
             const px = rect.x + ((event.clientX - bounds.left) / bounds.width) * rect.w;
             const py = rect.y + ((event.clientY - bounds.top) / bounds.height) * rect.h;
-            let hit = null;
-            let nearest = Infinity;
-            items.forEach((item) => {
-              (item.own || item.rects || []).forEach((r) => {
-                const inside = px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
-                const centre = r.x + r.w / 2;
-                const distance = inside ? -1 : Math.abs(px - centre);
-                if (distance < nearest) {
-                  nearest = distance;
-                  hit = item;
-                }
-              });
-            });
-            this.onSelect((hit || items[0]).key);
+            const own = (item) => item.own || item.rects || [];
+            const hit = items.find((item) =>
+              own(item).some((r) =>
+                px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h
+              )
+            );
+            const leftmost = (item) => Math.min(...own(item).map((r) => r.x));
+            const first = items.reduce(
+              (best, item) => (leftmost(item) < leftmost(best) ? item : best),
+              items[0]
+            );
+            this.onSelect((hit || first).key);
           });
           page.overlay.append(box);
         });
@@ -303,11 +306,14 @@
 
        Rendered fresh rather than reusing the on-screen canvases, which are sized
        to the pane: a narrow window would otherwise send a picture too coarse to
-       locate anything on. JPEG keeps the upload sane on a multi-page scan. */
-    async pageImages({ scale = 2, quality = 0.82 } = {}) {
-      const out = {};
-      if (!this.doc) return out;
-      for (let number = 1; number <= this.doc.numPages; number += 1) {
+       locate anything on. JPEG keeps the upload sane on a multi-page scan.
+       Cached so box placement can start as soon as the first page is ready. */
+    async pageImage(number, { scale = 2, quality = 0.82 } = {}) {
+      const key = String(number);
+      if (this._pageImages[key]) return this._pageImages[key];
+      if (this._pageImagePending[key]) return this._pageImagePending[key];
+      if (!this.doc) return "";
+      this._pageImagePending[key] = (async () => {
         const page = await this.doc.getPage(number);
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement("canvas");
@@ -317,7 +323,22 @@
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, canvas.width, canvas.height);
         await page.render({ canvasContext: context, viewport }).promise;
-        out[String(number)] = canvas.toDataURL("image/jpeg", quality);
+        const url = canvas.toDataURL("image/jpeg", quality);
+        this._pageImages[key] = url;
+        return url;
+      })();
+      try {
+        return await this._pageImagePending[key];
+      } finally {
+        delete this._pageImagePending[key];
+      }
+    }
+
+    async pageImages(opts = {}) {
+      const out = {};
+      if (!this.doc) return out;
+      for (let number = 1; number <= this.doc.numPages; number += 1) {
+        out[String(number)] = await this.pageImage(number, opts);
       }
       return out;
     }

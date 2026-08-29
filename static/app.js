@@ -116,6 +116,7 @@ const state = {
   bytesDropped: false,
   split: 50,
   refined: null,
+  refining: false,
   cronos: null,
   step: "header",
   pdf: null,
@@ -888,6 +889,9 @@ async function restoreSession() {
     els.formPicker.classList.add("hidden");
     els.formBody.classList.remove("hidden");
     if (state.edcSaved) markSavedToEdc();
+    const located = collectHighlights(state.payload.form)
+      .some((item) => item.match === "located");
+    if (!located) refineBoxes(prefetchPageImages());
   }
 
   setStep(landing);
@@ -919,6 +923,11 @@ function showOriginal() {
     ? Promise.resolve(state.fileBytes)
     : state.file.arrayBuffer().then((bytes) => (state.fileBytes = bytes)))
     .then((bytes) => state.pdf.load(bytes))
+    .then(() => {
+      // Warm page images during header confirm so locate does not wait on
+      // canvas work after the values are already on screen.
+      prefetchPageImages();
+    })
     .catch((error) => {
       console.warn("original document could not be rendered", error);
       const viewer = /viewer|too long|unavailable/i.test(String(error && error.message));
@@ -943,6 +952,8 @@ function setHighlights(highlights) {
 function resetMapping() {
   state.header = null;
   state.payload = null;
+  state.refined = null;
+  state.refining = false;
   state.forms = [];
   state.selectedKey = null;
   state.edcSaved = false;
@@ -1323,6 +1334,7 @@ function collectHighlights(container) {
         issues: field.issues || [],
         page: source.page,
         rects: source.rects,
+        match: source.match,
       });
     });
   };
@@ -1338,11 +1350,19 @@ function collectHighlights(container) {
   return out;
 }
 
+function boxesToDraw(container) {
+  // Parser/interpolated rectangles cover whole tables and look wrong. Only
+  // vision-located boxes are drawn, so a reviewer never sees the guess.
+  return mergeRowBoxes(
+    collectHighlights(container).filter((item) => item.match === "located")
+  );
+}
+
 function refreshHighlights() {
   // Header confirm is just the three identifiers — boxing them on the page
   // adds noise. Boxes belong on the CRF review, where each value is checked.
   if (state.step === "form" && state.payload) {
-    state.payload.highlights = mergeRowBoxes(collectHighlights(state.payload.form));
+    state.payload.highlights = boxesToDraw(state.payload.form);
     setHighlights(state.payload.highlights);
   } else {
     setHighlights([]);
@@ -1531,7 +1551,7 @@ function renderForm(payload) {
     els.formSections.appendChild(card);
   });
 
-  payload.highlights = mergeRowBoxes(collectHighlights(payload.form));
+  payload.highlights = boxesToDraw(payload.form);
   setHighlights(payload.highlights);
 }
 
@@ -1628,6 +1648,7 @@ async function loadVisit() {
 
   els.formPicker.classList.add("hidden");
   els.formBody.classList.remove("hidden");
+  prefetchPageImages();
   busy("Connecting with Cronos…");
   try {
     const visit = await api(`/api/documents/${state.result.job_id}/visit`, {
@@ -1644,8 +1665,6 @@ async function loadVisit() {
     renderVisitSummary(visit.form, header);
 
     busy("Reading the document into the Cronos CRFs… this can take a minute.");
-    // Render page screenshots while the model reads the form, so box placement
-    // does not wait on canvas work after the values are already on screen.
     const pageImages = prefetchPageImages();
     const payload = await api(`/api/documents/${state.result.job_id}/visit/map`, {
       method: "POST",
@@ -1653,11 +1672,12 @@ async function loadVisit() {
       body: JSON.stringify({ header }),
     });
     state.payload = payload;
+    // Locate starts before the form paints, and parser boxes are never drawn,
+    // so the first thing on the page is a vision box rather than a table guess.
+    refineBoxes(pageImages);
     renderForm(payload);
     saveSessionNow();
     els.extractedScroll.scrollTop = 0;
-    // Not awaited: the review is usable while the boxes are still being placed.
-    refineBoxes(pageImages);
   } catch (error) {
     els.formSections.innerHTML = "";
     inlineNotice(els.formSections, error.message, "warn", {
@@ -1732,11 +1752,10 @@ function renderVisitSummary(form, header) {
 /* --------------------------------------------------------------- box refining
 
    The parser gives one rectangle for a whole table, so every row inside it is
-   interpolated and drifts wherever the printed rows are not evenly spaced. This
-   shows each page to a locator (OpenAI vision when OPENAI_VISION_MODEL is set,
-   otherwise Tesseract) and asks it to point at the values instead.
-
-   Misses keep the interpolated box. */
+   interpolated and drifts wherever the printed rows are not evenly spaced. Those
+   guesses are never drawn. Each page is shown to a locator (OpenAI vision when
+   OPENAI_VISION_MODEL is set, otherwise Tesseract) and only those boxes appear,
+   page by page, as soon as that page is ready. */
 
 function prefetchPageImages() {
   if (!state.pdf) return Promise.resolve({});
@@ -1748,40 +1767,54 @@ function prefetchPageImages() {
     });
 }
 
-async function refineBoxes(pagesPromise) {
-  if (!state.payload || !state.pdf) return;
-  const targets = (state.payload.highlights || [])
+function locateTargets() {
+  if (!state.payload) return [];
+  return collectHighlights(state.payload.form)
     .filter((item) => item.page && item.value !== null && item.value !== undefined
       && String(item.value) !== "")
     .map((item) => ({
       id: item.key, key: item.key, page: item.page,
-      // The CRF block this value was read from. Two blocks on this sheet ask the
-      // same questions, so without it the page cannot say which one is meant.
       section: item.section || item.group,
       label: item.label, locator: item.locator, evidence: item.evidence,
       value: item.value, raw: item.raw, rects: item.rects,
     }));
+}
+
+async function refineBoxes(pagesPromise) {
+  if (!state.payload || !state.pdf || state.refining) return;
+  const targets = locateTargets();
   if (!targets.length) return;
 
+  state.refining = true;
   const done = working(els.formSections, "Placing boxes on the page…");
   try {
-    const pages = pagesPromise
-      ? await pagesPromise
-      : await prefetchPageImages();
-    const images = pages && Object.keys(pages).length ? pages : await state.pdf.pageImages();
-    const data = await api(`/api/documents/${state.result.job_id}/locate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pages: images, targets }),
-    });
-    const located = data.located || {};
-    const placed = applyLocated(located);
-    state.refined = { model: data.model, placed, requested: targets.length };
-    refreshHighlights();
-    saveSessionNow();
+    await (state.pdf.loaded || Promise.resolve());
+    if (pagesPromise) pagesPromise.catch(() => {});
+    const pages = [...new Set(targets.map((item) => item.page))]
+      .filter((page) => page)
+      .sort((a, b) => a - b);
+    let placed = 0;
+    for (const page of pages) {
+      if (!state.payload) break;
+      const image = state.pdf.pageImage
+        ? await state.pdf.pageImage(page)
+        : (await state.pdf.pageImages())[String(page)];
+      if (!image) continue;
+      const batch = targets.filter((item) => item.page === page);
+      const data = await api(`/api/documents/${state.result.job_id}/locate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pages: { [String(page)]: image }, targets: batch }),
+      });
+      placed += applyLocated(data.located || {});
+      state.refined = { model: data.model, placed, requested: targets.length };
+      refreshHighlights();
+      saveSessionNow();
+    }
   } catch (error) {
     console.warn("boxes not refined", error);
   } finally {
+    state.refining = false;
     done();
   }
 }
