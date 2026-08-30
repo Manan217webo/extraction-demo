@@ -21,13 +21,76 @@ LOW_CONFIDENCE = 0.6
 _TICKED = re.compile(r"\[\s*(?:x|X|yes)\s*\]")
 _UNTICKED = re.compile(r"\[\s*(?:|no)\s*\]")
 
-DATE_FORMATS = [
-    "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%d %b %Y", "%d %B %Y",
-    "%b %d, %Y", "%B %d, %Y", "%d.%m.%Y", "%Y/%m/%d", "%d-%b-%Y", "%d %b %y",
-]
+# Canonical display: "30 Aug 2026". English month names, so a Windows machine
+# whose locale is not English still writes and reads the same string.
+_MONTHS_EN = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+_MONTH_NUM = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+_NUMERIC_DATES = (
+    "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y",
+    "%d.%m.%Y", "%Y/%m/%d",
+)
+_NAMED_DATE = re.compile(
+    r"^(\d{1,2})[\s\-]+([A-Za-z]+)\.?,?[\s\-]+(\d{2,4})$"
+)
+_NAMED_DATE_US = re.compile(
+    r"^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$"
+)
 TIME_FORMATS = ["%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M%p", "%H%M"]
 
 _NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?")
+
+
+def parse_date(text: str) -> Optional[datetime]:
+    """Read a date written in any of the forms the page or the model use."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$", raw)
+    if iso:
+        try:
+            return datetime(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+    for fmt in _NUMERIC_DATES:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    named = _NAMED_DATE.match(raw)
+    if named:
+        day, month_name, year = int(named.group(1)), named.group(2).lower(), named.group(3)
+        month = _MONTH_NUM.get(month_name.rstrip("."))
+        year_n = int(year) + (2000 if len(year) == 2 else 0)
+        if month:
+            try:
+                return datetime(year_n, month, day)
+            except ValueError:
+                return None
+    named_us = _NAMED_DATE_US.match(raw)
+    if named_us:
+        month = _MONTH_NUM.get(named_us.group(1).lower().rstrip("."))
+        if month:
+            try:
+                return datetime(int(named_us.group(3)), month, int(named_us.group(2)))
+            except ValueError:
+                return None
+    return None
+
+
+def format_date(value: Any) -> str:
+    """`dd mmm yyyy`, English months, zero-padded day — e.g. 30 Aug 2026."""
+    parsed = value if isinstance(value, datetime) else parse_date(str(value or ""))
+    if parsed is None:
+        return "" if value is None else str(value)
+    return f"{parsed.day:02d} {_MONTHS_EN[parsed.month - 1]} {parsed.year}"
 
 
 # --------------------------------------------------------------------------- coercion
@@ -58,11 +121,9 @@ def _coerce(value: Any, field: dict[str, Any]) -> tuple[Any, list[str]]:
         return match.group(0), issues
 
     if kind == "date":
-        for fmt in DATE_FORMATS:
-            try:
-                return datetime.strptime(text, fmt).date().isoformat(), issues
-            except ValueError:
-                continue
+        parsed = parse_date(text)
+        if parsed:
+            return format_date(parsed), issues
         return text, ["unrecognised_date"]
 
     if kind == "time":

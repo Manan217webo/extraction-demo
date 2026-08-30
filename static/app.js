@@ -162,6 +162,48 @@ async function api(path, options) {
   return data;
 }
 
+const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTH_NUM = Object.fromEntries(
+  MONTHS_EN.flatMap((name, i) => [[name.toLowerCase(), i + 1]]).concat([
+    ["january", 1], ["february", 2], ["march", 3], ["april", 4], ["may", 5],
+    ["june", 6], ["july", 7], ["august", 8], ["september", 9], ["sept", 9],
+    ["october", 10], ["november", 11], ["december", 12],
+  ])
+);
+
+function parseDateParts(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  let match = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/.exec(raw);
+  if (match) return { y: +match[1], mo: +match[2], d: +match[3] };
+  match = /^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/.exec(raw)
+    || /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(raw);
+  if (match) {
+    const a = +match[1], b = +match[2], y = +match[3];
+    if (a > 12) return { y, mo: b, d: a };
+    if (b > 12) return { y, mo: a, d: b };
+    return { y, mo: b, d: a };
+  }
+  match = /^(\d{1,2})[\s-]+([A-Za-z]+)\.?,?[\s-]+(\d{4})$/.exec(raw);
+  if (match && MONTH_NUM[match[2].toLowerCase()]) {
+    return { y: +match[3], mo: MONTH_NUM[match[2].toLowerCase()], d: +match[1] };
+  }
+  match = /^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$/.exec(raw);
+  if (match && MONTH_NUM[match[1].toLowerCase()]) {
+    return { y: +match[3], mo: MONTH_NUM[match[1].toLowerCase()], d: +match[2] };
+  }
+  return null;
+}
+
+function formatDate(text) {
+  const parts = parseDateParts(text);
+  if (!parts || parts.mo < 1 || parts.mo > 12 || parts.d < 1 || parts.d > 31) {
+    return text == null ? "" : String(text);
+  }
+  return `${String(parts.d).padStart(2, "0")} ${MONTHS_EN[parts.mo - 1]} ${parts.y}`;
+}
+
 /* ----------------------------------------------------------------- credits */
 
 function renderCredits(credits) {
@@ -183,11 +225,7 @@ function renderCredits(credits) {
   els.popUsed.textContent = fmt(used);
   els.popTotal.textContent = fmt(total);
   els.popRenews.textContent = renews
-    ? `Allowance renews ${new Date(renews).toLocaleDateString(undefined, {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-      })}`
+    ? `Allowance renews ${formatDate(renews)}`
     : "";
 }
 
@@ -1259,9 +1297,30 @@ function fieldControl(field) {
     return { node: area, read: () => area.value.trim() || null };
   }
 
+  if (field.type === "date") {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = "dd mmm yyyy";
+    input.value = value ? formatDate(value) : "";
+    return {
+      node: input,
+      read: () => {
+        const raw = input.value.trim();
+        if (!raw) return null;
+        const parts = parseDateParts(raw);
+        if (!parts) return raw;
+        const shown = formatDate(raw);
+        if (shown !== input.value) input.value = shown;
+        return shown;
+      },
+    };
+  }
+
   const input = document.createElement("input");
   input.type =
-    field.type === "date" ? "date" : field.type === "time" ? "time"
+    field.type === "time" ? "time"
       : field.type === "number" ? "number" : "text";
   if (field.type === "number") input.step = "any";
   input.value = value;

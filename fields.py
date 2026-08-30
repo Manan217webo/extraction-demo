@@ -205,7 +205,7 @@ Rules:
   mark rather than printed text. When a value comes from a tick box, `evidence`
   MUST contain the marker exactly as it appears in the text, e.g. "[x] Normal" or
   "[ ] CS [ ] NCS", so the tick can be checked.
-- Dates: return ISO 8601 `YYYY-MM-DD`. If the source is ambiguous (e.g. 03/04/2025)
+- Dates: return `dd mmm yyyy` (e.g. `30 Aug 2026`). If the source is ambiguous (e.g. 03/04/2025)
   keep the value but drop confidence below 0.6.
 - Times: return 24-hour `HH:MM`.
 - Numbers: digits only, no units. Record the unit only where a unit field exists.

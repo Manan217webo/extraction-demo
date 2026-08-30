@@ -91,7 +91,8 @@ def _issues(field: dict[str, Any]) -> str:
 def _value_cell(field: dict[str, Any], s: dict[str, ParagraphStyle]) -> list[Any]:
     if field.get("value") is None:
         return [Paragraph("Not recorded", s["empty"])]
-    text = _escape(field["value"])
+    text = _escape(mapping.format_date(field["value"]) if field.get("type") == "date"
+                   else field["value"])
     if field.get("unit"):
         text += f' <font color="#655f73" size="7">{_escape(field["unit"])}</font>'
     out: list[Any] = [Paragraph(text, s["value"])]
@@ -319,7 +320,8 @@ def _cover(payload: dict[str, Any], s: dict[str, ParagraphStyle], width: float) 
         s["subtitle"],
     ))
 
-    generated = datetime.now(timezone.utc).strftime("%d %b %Y %H:%M UTC")
+    now = datetime.now(timezone.utc)
+    generated = f"{mapping.format_date(now)} {now.strftime('%H:%M')} UTC"
     meta = [
         ("Source document", document.get("filename") or "—"),
         ("Pages", document.get("page_count") or "—"),

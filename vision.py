@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import fields
+import mapping
 
 log = logging.getLogger("extraction.vision")
 
@@ -230,13 +231,13 @@ def _needles(value: Any, tokens: bool = False) -> list[str]:
     collapsed = _alnum(text)
     add(collapsed)
 
-    # A date is held as ISO but written on the page in the order the boxes under
-    # it ask for — "DD MMM YY" here, digits in comb boxes. Searching for
-    # 20260216 can never match a page reading 160226, so every ordering the
-    # form might use is offered.
-    iso = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
-    if iso:
-        year, month, day = iso.groups()
+    # A date is held as "dd mmm yyyy" but written on the page in the order the
+    # boxes under it ask for — digits in comb boxes, sometimes ISO. Searching
+    # for 30Aug2026 can never match a page reading 160226, so every ordering
+    # the form might use is offered.
+    parsed = mapping.parse_date(text)
+    if parsed:
+        year, month, day = f"{parsed.year:04d}", f"{parsed.month:02d}", f"{parsed.day:02d}"
         short = year[2:]
         for form in (day + month + short, day + month + year,
                      short + month + day, year + month + day,
