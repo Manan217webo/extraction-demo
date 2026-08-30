@@ -364,7 +364,7 @@
        a fixed scale rather than reusing the on-screen canvases: those are sized
        to fit the pane, so a narrow window would post an unreadable crop. Each
        page is rendered once and reused across every field that sits on it. */
-    async cropRegions(items, { scale = 2, padding = 0.006 } = {}) {
+    async cropRegions(items, { scale = 2, padding = 0.006, format = "image/png", quality = 0.85 } = {}) {
       const out = {};
       if (!this.doc) return out;
       const sheets = new Map();
@@ -404,8 +404,8 @@
             width, height, 0, 0, width, height
           );
           out[item.key] = {
-            base64Data: crop.toDataURL("image/png").split(",")[1],
-            contentType: "image/png",
+            base64Data: crop.toDataURL(format, quality).split(",")[1],
+            contentType: format,
           };
         }
       } finally {

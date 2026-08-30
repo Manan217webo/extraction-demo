@@ -754,6 +754,25 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                     f"values read for it can be stored. Check this CRF in the EDC."
                 )
 
+        # Whole-page images for this CRF, keyed "<section>.__page.<n>" by the
+        # browser. One per page the CRF's values were read from; a CRF spread
+        # over two pages sends both. They belong to the CRF, not to a field,
+        # so they carry the CRF's name and no field_id.
+        prefix = f"{section['section_id']}.__page."
+        for key in sorted(k for k in crops if k.startswith(prefix)):
+            crop = crops.get(key) or {}
+            if not crop.get("base64Data"):
+                continue
+            used_crops.add(key)
+            page = key[len(prefix):]
+            ext = "jpg" if "jpeg" in (crop.get("contentType") or "") else "png"
+            images.append({
+                "field_name": f"{meta['crfName']} — page {page}",
+                "fileName": f"{section['section_id']}_page{page}.{ext}",
+                "contentType": crop.get("contentType") or "image/jpeg",
+                "base64Data": crop["base64Data"],
+            })
+
         crf: dict[str, Any] = {
             "crfName": meta["crfName"],
             "crfId": meta["crfId"],
