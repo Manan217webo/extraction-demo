@@ -1318,6 +1318,18 @@ mark.current { background: var(--purple); color: #fff; }
   overflow-wrap: anywhere;
 }
 .issue { color: #96650c; font-weight: 700; }
+.confidence {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #e8f4ec;
+  color: #2c6b45;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.confidence.low { background: #fbf1de; color: #96650c; }
+.struck { color: #5c566b; font-weight: 700; }
+.struck s { text-decoration-color: #b23a51; }
+.second-read { color: #5c566b; font-weight: 700; }
 .issue.hard { color: #b23a51; }
 .edited { color: var(--purple-deep); font-weight: 800; }
 
@@ -1379,6 +1391,16 @@ mark.current { background: var(--purple); color: #fff; }
   outline-offset: -2px;
 }
 .crf-section > summary > div { flex: 1; min-width: 0; }
+.to-check {
+  flex: none;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: #fbf1de;
+  color: #96650c;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
 .crf-section > summary h4 { margin: 0; font-size: 15px; }
 .crf-section > summary p { margin: 3px 0 0; font-size: 12px; color: var(--muted); line-height: 1.55; }
 .crf-section > summary::after {

@@ -53,6 +53,8 @@ pydantic==2.13.4
     #   llama-cloud
 pydantic-core==2.46.4
     # via pydantic
+pypdfium2==5.14.0
+    # via extraction-demo
 pytesseract==0.3.13
     # via extraction-demo
 python-dotenv==1.2.3

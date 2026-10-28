@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -41,7 +42,9 @@ import auth
 import cronos
 import edc
 import fields
+import local_fields
 import mapping
+import render
 import store
 import vision
 import visit_forms
@@ -68,6 +71,26 @@ API_BASE = (os.getenv("LLAMA_CLOUD_BASE_URL") or "https://api.cloud.llamaindex.a
 GENERIC_FAILURE = "We couldn't process this document. Please try again."
 
 PUBLIC_API_PATHS = {"/api/login", "/healthz"}
+
+# Who reads the page. "vision" (the default) renders the PDF to page images and
+# the field model reads those directly, with no parsing service in between.
+# "llamaparse" is the original LlamaCloud parse, kept for comparison.
+PARSER = (os.getenv("PARSER") or "vision").strip().lower()
+MAX_PAGES = max(1, int(os.getenv("MAX_PAGES") or 30))
+
+
+def _vision() -> bool:
+    return PARSER != "llamaparse"
+
+
+def _is_vision_job(meta: dict[str, Any]) -> bool:
+    return meta.get("parser") == "vision"
+
+
+def _anchoring(meta: dict[str, Any], index: anchors.PageIndex) -> bool:
+    """Whether values can be boxed on the page: by the parser's layout, or by the
+    locator looking at the page image."""
+    return bool(index) or (_is_vision_job(meta) and vision.configured())
 
 
 def _allowed_modes() -> set[str]:
@@ -109,7 +132,6 @@ MODES: list[dict[str, Any]] = [
         "credits_per_page": 10,
         "speed": "One to two minutes",
         "accuracy": 3,
-        "recommended": True,
     },
     {
         "id": "maximum",
@@ -120,6 +142,7 @@ MODES: list[dict[str, Any]] = [
         "credits_per_page": 45,
         "speed": "Several minutes",
         "accuracy": 4,
+        "recommended": True,
     },
 ]
 
@@ -133,7 +156,7 @@ TIER_FOR_MODE = {
     "high": "agentic",
     "maximum": "agentic_plus",
 }
-DEFAULT_MODE = "high"
+DEFAULT_MODE = "maximum"
 
 _client: Optional[AsyncLlamaCloud] = None
 _org_id: Optional[str] = None
@@ -563,9 +586,14 @@ async def session() -> dict[str, Any]:
     """Everything the page needs on load: readiness, modes and the credit balance."""
     connector = cronos.get_connector()
     return {
-        "ready": _api_key_configured(),
+        "ready": fields.configured() if _vision() else _api_key_configured(),
         "modes": _visible_modes(),
-        "credits": await _credits(),
+        "credits": {"available": False} if _vision() else await _credits(),
+        "reader": {
+            "kind": "vision" if _vision() else "llamaparse",
+            "model": fields.model_name(),
+            "second_read": fields.second_read_model(),
+        },
         "max_file_mb": MAX_BYTES // (1024 * 1024),
         "mapping": {
             "ready": fields.configured(),
@@ -578,6 +606,8 @@ async def session() -> dict[str, Any]:
 
 @app.get("/api/credits")
 async def credits(refresh: bool = False) -> dict[str, Any]:
+    if _vision():
+        return {"available": False}
     return await _credits(force=refresh)
 
 
@@ -588,10 +618,8 @@ async def create_extraction(
     mode: str = Form(DEFAULT_MODE),
 ) -> dict[str, Any]:
     username = await _current_user(request)
-    mode = (mode or DEFAULT_MODE).strip().lower()
-    visible = {m["id"] for m in _visible_modes()}
-    if mode not in MODE_IDS or mode not in visible:
-        raise HTTPException(status_code=400, detail="Please choose an extraction mode.")
+    # Always Maximum Accuracy — the mode picker was removed from the UI.
+    mode = DEFAULT_MODE
     tier = TIER_FOR_MODE[mode]
 
     filename = file.filename or "document.pdf"
@@ -606,6 +634,9 @@ async def create_extraction(
             status_code=413,
             detail=f"PDFs must be {MAX_BYTES // (1024 * 1024)} MB or smaller.",
         )
+
+    if _vision():
+        return await _create_vision_job(username, filename, contents)
 
     client = get_client()
     try:
@@ -638,10 +669,71 @@ async def create_extraction(
     }
 
 
+async def _create_vision_job(username: str, filename: str, contents: bytes) -> dict[str, Any]:
+    """Render the pages now. There is nothing to wait for after this."""
+    if not fields.configured():
+        raise HTTPException(
+            status_code=503,
+            detail="The extraction service isn't configured yet. Please contact your administrator.",
+        )
+    started = time.monotonic()
+    try:
+        images = await render.page_images(contents, MAX_PAGES)
+    except render.RenderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    job_id = uuid.uuid4().hex
+    meta = {
+        "job_id": job_id,
+        "filename": filename,
+        "mode": "vision",
+        "parser": "vision",
+        "pages": len(images),
+        "owner": username,
+    }
+    await store.put_parse(job_id, {
+        "markdown": "",
+        "pages": [{"page_number": int(n), "content": ""} for n in images],
+        "items": [],
+        "images": images,
+    })
+    await store.put_job(job_id, meta)
+    log.info("rendered %s page(s) of %s for %s in %.1fs", len(images), filename,
+             job_id, time.monotonic() - started)
+    return {"job_id": job_id, "filename": filename, "mode": "vision",
+            "page_count": len(images), "status": "COMPLETED"}
+
+
+def _vision_status(meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": meta["job_id"],
+        "status": "COMPLETED",
+        "filename": meta.get("filename"),
+        "mode": "vision",
+        "parser": "vision",
+        "error": None,
+        "page_count": meta.get("pages"),
+        "credits_used": None,
+        "markdown": "",
+        "text": "",
+        "pages": [],
+    }
+
+
+async def _job_images(job_id: str, limit: Optional[int] = None) -> dict[str, str]:
+    """The page images rendered at upload, for a vision job."""
+    parse = await store.get_parse(job_id) or {}
+    images = parse.get("images") or {}
+    if limit:
+        images = {n: url for n, url in images.items() if int(n) <= limit}
+    return images
+
+
 @app.get("/api/documents/{job_id}")
 async def extraction_status(job_id: str, request: Request) -> dict[str, Any]:
     username = await _current_user(request)
     meta = await _owned_job(job_id, username)
+    if _is_vision_job(meta):
+        return _vision_status(meta)
     tier = meta.get("tier") or TIER_FOR_MODE[DEFAULT_MODE]
     client = get_client()
 
@@ -735,6 +827,10 @@ async def _parse_artifacts(job_id: str, username: str) -> tuple[dict[str, Any], 
     if cached:
         return meta, cached
 
+    if _is_vision_job(meta):
+        # Rendered at upload; gone only once the job itself has expired.
+        raise HTTPException(status_code=404, detail="That extraction could not be found.")
+
     async with store.lock(f"parse:{job_id}"):
         cached = await store.get_parse(job_id)
         if cached:
@@ -782,7 +878,7 @@ def _header_response(job_id: str, meta: dict[str, Any], header: dict[str, Any],
         "header": header,
         "highlights": mapping.highlights(header),
         "summary": header["summary"],
-        "anchoring": bool(index),
+        "anchoring": _anchoring(meta, index),
         "truncated": fields.was_truncated(document),
         "header_pages_read": len(pages),
         "usage": usage,
@@ -816,10 +912,15 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
 
             read_started = time.monotonic()
             try:
+                images = (await _job_images(job_id, HEADER_PAGE_LIMIT)
+                          if _is_vision_job(meta) else None)
                 async with _read_sem:
-                    result = await fields.extract_header(document)
+                    result = await fields.extract_header(document, images)
             except fields.ExtractionUnavailable as exc:
-                raise HTTPException(status_code=503, detail=str(exc)) from exc
+                # The reviewer confirms these three identifiers by hand, so a
+                # reading from the parsed text is still worth showing them.
+                log.warning("header read fell back to the parsed text: %s", exc)
+                result = local_fields.extract_header(document)
             log.info("header read for %s in %.1fs", job_id, time.monotonic() - read_started)
 
             meta, parse = await layout
@@ -875,6 +976,9 @@ async def cronos_form(form_id: str) -> dict[str, Any]:
 class MapRequest(BaseModel):
     form_id: str
     header: dict[str, Any] = {}
+    # Page number -> data URL of the rendered page, so handwriting and
+    # strike-throughs are read from the image rather than the transcription.
+    pages: dict[str, str] = {}
 
 
 def _apply_header_edits(header: dict[str, Any], confirmed: dict[str, Any]) -> None:
@@ -919,7 +1023,8 @@ async def map_to_form(job_id: str, request: MapRequest, http_request: Request) -
     started = time.monotonic()
     try:
         async with _read_sem:
-            result = await fields.extract_form(document, form, confirmed)
+            result = await fields.extract_form(document, form, confirmed,
+                                               parse.get("images") or request.pages)
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     log.info("form read for %s in %.1fs (%s value(s), %s repaired, %s dropped)",
@@ -932,10 +1037,12 @@ async def map_to_form(job_id: str, request: MapRequest, http_request: Request) -
         "form": mapping.build_form(form, result["values"], index),
     }
     mapping.revalidate(payload)
-    payload["anchoring"] = bool(index)
+    payload["anchoring"] = _anchoring(meta, index)
     payload["truncated"] = fields.was_truncated(document)
     payload["dropped"] = result.get("dropped", 0)
     payload["usage"] = result.get("usage", {})
+    payload["reading"] = {"page_images": result.get("images", 0),
+                          "second_read": result.get("second_read")}
     return payload
 
 
@@ -988,6 +1095,7 @@ async def load_visit(job_id: str, request: VisitRequest, http_request: Request) 
 
 class VisitMapRequest(BaseModel):
     header: dict[str, Any] = {}
+    pages: dict[str, str] = {}
 
 
 @app.post("/api/documents/{job_id}/visit/map")
@@ -1013,11 +1121,13 @@ async def map_to_visit(job_id: str, request: VisitMapRequest,
     started = time.monotonic()
     try:
         async with _read_sem:
-            result = await fields.extract_form(document, definition, confirmed)
+            result = await fields.extract_form(document, definition, confirmed,
+                                               parse.get("images") or request.pages)
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    log.info("visit read for %s in %.1fs (%s value(s))", job_id,
-             time.monotonic() - started, len(result["values"]))
+    log.info("visit read for %s in %.1fs (%s value(s), %s page image(s), second read %s)",
+             job_id, time.monotonic() - started, len(result["values"]),
+             result.get("images", 0), result.get("second_read") or "off")
 
     payload = {
         "document": _document_meta(job_id, meta),
@@ -1025,9 +1135,11 @@ async def map_to_visit(job_id: str, request: VisitMapRequest,
         "form": mapping.build_form(definition, result["values"], index),
     }
     mapping.revalidate(payload)
-    payload["anchoring"] = bool(index)
+    payload["anchoring"] = _anchoring(meta, index)
     payload["truncated"] = fields.was_truncated(document)
     payload["usage"] = result.get("usage", {})
+    payload["reading"] = {"page_images": result.get("images", 0),
+                          "second_read": result.get("second_read")}
     return payload
 
 

@@ -87,6 +87,17 @@ def check_env_file() -> None:
 
 
 def check_document_reader() -> None:
+    if (os.getenv("PARSER") or "vision").strip().lower() != "llamaparse":
+        try:
+            import render  # noqa: F401
+        except ImportError as exc:
+            record(FAIL, "Document reader (page images)",
+                   f"pypdfium2 is not installed ({exc}) — run `uv sync`.")
+            return
+        record(PASS, "Document reader (page images)",
+               "pages are rendered on this server and read by the field model; "
+               "no LlamaCloud key needed.")
+        return
     key = (os.getenv("LLAMA_CLOUD_API_KEY") or "").strip()
     if not key:
         record(FAIL, "Document reader (LlamaCloud)",

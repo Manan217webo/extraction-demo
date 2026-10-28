@@ -12,7 +12,6 @@ const els = {
   fileName: $("file-name"),
   fileDetail: $("file-detail"),
   clearFile: $("clear-file"),
-  modes: $("modes"),
   runFile: $("run-file"),
   runMode: $("run-mode"),
   runCost: $("run-cost"),
@@ -167,7 +166,14 @@ function formatBytes(bytes) {
 }
 
 function activeMode() {
-  return state.modes.find((m) => m.id === state.modeId) || state.modes[0] || null;
+  return (
+    state.modes.find((m) => m.id === "maximum") || {
+      id: "maximum",
+      name: "Maximum Accuracy",
+      credits_per_page: 45,
+      speed: "Several minutes",
+    }
+  );
 }
 
 let onUnauthorized = null;
@@ -290,38 +296,8 @@ async function refreshCredits(force) {
 /* ------------------------------------------------------------------- modes */
 
 function renderModes() {
-  els.modes.innerHTML = "";
-  state.modes.forEach((mode) => {
-    const card = document.createElement("button");
-    card.type = "button";
-    card.className = "mode" + (mode.id === state.modeId ? " selected" : "");
-    card.setAttribute("role", "radio");
-    card.setAttribute("aria-checked", String(mode.id === state.modeId));
-    card.dataset.mode = mode.id;
-
-    const bars = [1, 2, 3, 4]
-      .map((n) => `<i class="${n <= mode.accuracy ? "on" : ""}"></i>`)
-      .join("");
-
-    card.innerHTML = `
-      ${mode.recommended ? '<span class="mode-badge">Recommended</span>' : ""}
-      <span class="mode-name">${mode.name}</span>
-      <span class="mode-tag">${mode.tagline}</span>
-      <p class="mode-desc">${mode.description}</p>
-      <div class="mode-best"><b>Best for</b>${mode.best_for}</div>
-      <div class="mode-foot">
-        <span class="mode-cost">${mode.credits_per_page} <span>credits/page</span></span>
-        <span class="accuracy" title="Reading depth">${bars}</span>
-      </div>
-      <div class="mode-speed">Usually ${mode.speed.toLowerCase()}</div>
-    `;
-    card.addEventListener("click", () => {
-      state.modeId = mode.id;
-      renderModes();
-      updateRunBar();
-    });
-    els.modes.appendChild(card);
-  });
+  // Mode picker removed — every extraction uses Maximum Accuracy.
+  state.modeId = "maximum";
 }
 
 /* -------------------------------------------------------------------- file */
@@ -374,10 +350,15 @@ async function setFile(file) {
 function updateRunBar() {
   const mode = activeMode();
   els.runFile.textContent = state.file ? state.file.name : "No file selected";
-  els.runMode.textContent = mode ? mode.name : "—";
+  els.runMode.textContent = "Maximum Accuracy";
 
-  if (!mode) {
-    els.runCost.textContent = "—";
+  const reader = state.reader || {};
+  if (reader.kind === "vision") {
+    // No parsing credits: each page image is read by the field model.
+    els.runMode.textContent = reader.second_read && reader.second_read !== reader.model
+      ? `Page images · ${reader.model} + ${reader.second_read}`
+      : `Page images · ${reader.model}${reader.second_read ? " (read twice)" : ""}`;
+    els.runCost.textContent = "No parsing credits";
   } else if (state.pages) {
     els.runCost.textContent = `about ${fmt(state.pages * mode.credits_per_page)} credits`;
   } else {
@@ -720,7 +701,22 @@ const ISSUE_TEXT = {
   below_expected_range: "below the expected range",
   above_expected_range: "above the expected range",
   required_field_empty: "required, but empty",
+  corrected_on_page: "corrected on the page",
+  reads_disagree: "two reads disagree",
 };
+// Raised by how the value was read rather than by what it is.
+const READING_ISSUES = new Set(["low_confidence", "corrected_on_page", "reads_disagree"]);
+
+/* Values in a section a reviewer should look at before saving. */
+function toCheck(section) {
+  const all = [...(section.fields || [])];
+  (section.groups || []).forEach((group) =>
+    (group.instances || []).forEach((instance) => all.push(...(instance.fields || [])))
+  );
+  return all.filter((field) => (field.issues || []).some((code) => READING_ISSUES.has(code)))
+    .length;
+}
+
 const HARD_ISSUES = new Set([
   "not_a_number", "not_an_allowed_option", "required_field_empty",
   "below_expected_range", "above_expected_range",
@@ -1545,12 +1541,41 @@ function renderField(field, { compact = false } = {}) {
     edited.textContent = field.status === "manual" ? "Entered by you" : "Edited";
     meta.appendChild(edited);
   }
+  if (field.value !== null && typeof field.confidence === "number") {
+    const score = document.createElement("span");
+    const pct = Math.round(field.confidence * 100);
+    score.className = `confidence${field.confidence < 0.6 ? " low" : ""}`;
+    score.textContent = `${pct}%`;
+    score.title = "How sure the reading is. Two reads that disagree, or a correction on the page, keep this low.";
+    meta.appendChild(score);
+  }
   (field.issues || []).forEach((code) => {
     const issue = document.createElement("span");
     issue.className = `issue${HARD_ISSUES.has(code) ? " hard" : ""}`;
     issue.textContent = ISSUE_TEXT[code] || code.replace(/_/g, " ");
     meta.appendChild(issue);
   });
+  const reading = field.reading || {};
+  if (field.status !== "edited" && field.status !== "manual") {
+    if (reading.corrected) {
+      const struck = document.createElement("span");
+      struck.className = "struck";
+      if (reading.struck_value) {
+        const old = document.createElement("s");
+        old.textContent = reading.struck_value;
+        struck.append("Struck out: ", old);
+      } else {
+        struck.textContent = "Entry struck out";
+      }
+      meta.appendChild(struck);
+    }
+    if (reading.reads > 1 && !reading.agreed) {
+      const other = document.createElement("span");
+      other.className = "second-read";
+      other.textContent = `Other read: ${reading.second_value ?? "blank"}`;
+      meta.appendChild(other);
+    }
+  }
   if (source.evidence) {
     const evidence = document.createElement("span");
     evidence.className = "evidence";
@@ -1568,7 +1593,15 @@ function renderField(field, { compact = false } = {}) {
     field.status = field.status === "empty" || field.value === null ? "manual" : "edited";
     field.confidence = null;
     field.source = { ...(field.source || {}), anchored: false, rects: [], match: "edited" };
+    // The reviewer has made the call these flags asked for. Type and range
+    // checks stay until the server revalidates the new value.
+    field.issues = (field.issues || []).filter((code) => !READING_ISSUES.has(code));
     row.classList.remove("is-empty", "is-flagged");
+    const freshMeta = renderField(field, { compact }).querySelector(".field-meta");
+    const oldMeta = wrap.querySelector(".field-meta");
+    if (oldMeta && freshMeta) oldMeta.replaceWith(freshMeta);
+    else if (oldMeta) oldMeta.remove();
+    else if (freshMeta) wrap.appendChild(freshMeta);
     refreshHighlights();
     saveSession();
   };
@@ -1897,6 +1930,23 @@ function renderForm(payload) {
         "extraction. Values from later pages will be missing."
     );
   }
+  const reading = payload.reading || {};
+  if (state.visit && reading.page_images === 0) {
+    inlineNotice(
+      els.formSections,
+      "Read from text only: the page images weren't available, so strike-throughs and " +
+        "corrections may be misread. Reload the document to read it from the page."
+    );
+  } else if (reading.page_images) {
+    inlineNotice(
+      els.formSections,
+      "Read from the page images" + (reading.second_read ? ", twice" : "") + ": the % " +
+        "beside each value is how sure the reading is" +
+        (reading.second_read ? " — it drops when the two reads disagree" : "") +
+        ". Values corrected on the page are flagged for you to confirm.",
+      "info"
+    );
+  }
   if (!payload.anchoring) {
     inlineNotice(
       els.formSections,
@@ -1921,6 +1971,14 @@ function renderForm(payload) {
       intro.appendChild(note);
     }
     head.appendChild(intro);
+    const checks = toCheck(section);
+    if (checks) {
+      const badge = document.createElement("span");
+      badge.className = "to-check";
+      badge.textContent = `${checks} to check`;
+      badge.title = "Uncertain readings, corrections on the page, or two reads that disagree";
+      head.appendChild(badge);
+    }
     card.appendChild(head);
 
     const body = document.createElement("div");
@@ -2074,9 +2132,9 @@ async function loadVisit() {
   els.formBody.classList.remove("hidden");
   els.formSections.innerHTML = "";
   flowStart("Connecting with Cronos…");
-  // The model read is the long part and needs no page image, so every page is
-  // rendered to an image during it rather than after — free work in a wait
-  // that was happening anyway.
+  // Every page is rendered to an image while the EDC is asked for the visit.
+  // The model reads handwriting and strike-throughs from those images, and the
+  // box locator uses them again afterwards.
   const pageImages = prefetchPageImages();
   try {
     const visit = await api(`/api/documents/${state.result.job_id}/visit`, {
@@ -2095,10 +2153,19 @@ async function loadVisit() {
 
     const crfs = (visit.form.crfs || []).length;
     flowStep(`Reading the document into ${crfs} CRF${crfs === 1 ? "" : "s"}…`);
+    // A vision job's pages were rendered on the server at upload.
+    let pages = {};
+    if (state.result.parser !== "vision") {
+      try {
+        pages = (await pageImages) || {};
+      } catch {
+        pages = {}; // the read still works from the text alone
+      }
+    }
     const payload = await api(`/api/documents/${state.result.job_id}/visit/map`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ header }),
+      body: JSON.stringify({ header, pages }),
     });
     state.payload = payload;
     renderForm(payload);
@@ -2830,9 +2897,9 @@ function showSignedIn(username) {
 async function loadAppSession() {
   const session = await api("/api/session");
   state.modes = session.modes || [];
-  const recommended = state.modes.find((m) => m.recommended);
-  state.modeId = recommended ? recommended.id : (state.modes[0] || {}).id;
+  state.modeId = "maximum";
   state.ready = Boolean(session.ready);
+  state.reader = session.reader || null;
   state.mappingReady = Boolean((session.mapping || {}).ready);
   state.cronos = (session.mapping || {}).cronos || null;
   els.maxMb.textContent = String(session.max_file_mb || 50);

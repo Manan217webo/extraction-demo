@@ -82,12 +82,17 @@ def _sanitize_for_model(text: str) -> str:
     return (text or "").replace("\x00", "").replace("±", "+/-")
 
 
+NO_TEXT = "(no text transcription — read this page from its image)"
+
+
 def document_for_model(pages: list[dict[str, Any]], markdown: str) -> str:
     """Page-tagged markdown, so the model can tell us which page it read a value on."""
     if pages:
+        # The vision reader has no transcription at all; say so rather than
+        # hand the model a run of empty pages it might read as blank forms.
         chunks = [
             f"<page number=\"{page.get('page_number') or index + 1}\">\n"
-            f"{_sanitize_for_model(page.get('content') or '').strip()}\n</page>"
+            f"{_sanitize_for_model(page.get('content') or '').strip() or NO_TEXT}\n</page>"
             for index, page in enumerate(pages)
         ]
         document = "\n\n".join(chunks)
@@ -128,6 +133,15 @@ VALUE_PROPERTIES = {
     "confidence": {
         "type": "number",
         "description": "0 to 1. Below 0.6 for handwriting you are unsure of.",
+    },
+    "corrected": {
+        "type": "boolean",
+        "description": "True when the entry on the page was struck through and corrected.",
+    },
+    "struck_value": {
+        "type": ["string", "null"],
+        "description": "The value that was struck through, as best you can read it. "
+                       "Null when nothing was struck.",
     },
 }
 
@@ -186,8 +200,18 @@ electronic case report form. Accuracy matters more than completeness.
 
 Rules:
 - Only report a value you can actually see on the page. Never infer, calculate or
-  carry a value over from another field. If a field is blank, struck through or you
-  cannot read it, return null.
+  carry a value over from another field. If a field is blank or you cannot read it,
+  return null.
+- Corrections. A source document is corrected by striking the old entry through
+  (a line, an X or a scribble) and writing the new entry beside it — above, below
+  or next to it, often with initials and a date. The struck entry is superseded:
+  report the new entry as `value`, the struck one as `struck_value`, and set
+  `corrected` true. A struck entry with no replacement is a null `value` with
+  `corrected` true. A tick box that has been crossed out is NOT ticked; the option
+  ticked beside it is the answer. The initials and date of a correction are never
+  a field's value. Where a replacement sits between two rows and you cannot tell
+  which one it belongs to, give your best reading, put confidence below 0.5 and
+  say why in `evidence`. Otherwise `corrected` is false and `struck_value` null.
 - Tick boxes reach you as markers, in two notations:
       [x]  or [yes]   the box IS ticked
       [ ]  or [no]    the box is EMPTY
@@ -215,8 +239,51 @@ Rules:
 - Return at most one entry per field address. Omit fields entirely rather than
   guessing."""
 
+# Added when the page images travel with the text. The transcription is good at
+# printed labels and loses what a strike-through looks like, so the image wins.
+IMAGE_RULES = """
+Page images:
+- Each page of the source document follows as an image, after the text. The text is
+  a machine transcription that helps you find labels and rows; it often merges a
+  struck entry with its correction, and may mark a crossed-out tick box as ticked.
+  Read every handwritten value and every tick from the IMAGE. Where the text and the
+  image disagree, the image is right.
+- For a tick box read from the image, write in `evidence` what you see in words
+  (e.g. "Normal crossed out, Abnormal ticked") instead of quoting the text markers."""
 
-def header_prompt(document: str) -> list[dict[str, str]]:
+# Data URLs the browser renders with pdf.js. Anything else is not a page image.
+_PAGE_IMAGE = re.compile(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$")
+MAX_PAGE_IMAGES = int(os.getenv("MAX_PAGE_IMAGES") or 12)
+
+
+def page_images(pages: Optional[dict[str, str]]) -> list[tuple[int, str]]:
+    """The page images worth sending, in page order."""
+    out: list[tuple[int, str]] = []
+    for number, url in (pages or {}).items():
+        try:
+            page = int(number)
+        except (TypeError, ValueError):
+            continue
+        if page > 0 and isinstance(url, str) and _PAGE_IMAGE.match(url):
+            out.append((page, url))
+    out.sort()
+    if len(out) > MAX_PAGE_IMAGES:
+        log.warning("sending %s of %s page images", MAX_PAGE_IMAGES, len(out))
+    return out[:MAX_PAGE_IMAGES]
+
+
+def _with_images(text: str, images: list[tuple[int, str]]) -> Any:
+    if not images:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for page, url in images:
+        parts.append({"type": "text", "text": f"Page {page}:"})
+        parts.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+    return parts
+
+
+def header_prompt(document: str,
+                  images: Optional[list[tuple[int, str]]] = None) -> list[dict[str, Any]]:
     lines = []
     for group in cronos.HEADER_GROUPS:
         lines.append(f"\n{group['name']}:")
@@ -231,20 +298,22 @@ def header_prompt(document: str) -> list[dict[str, str]]:
                 bits.append(f" — {field['description']}")
             lines.append("".join(bits))
     return [
-        {"role": "system", "content": RULES},
+        {"role": "system", "content": RULES + (IMAGE_RULES if images else "")},
         {
             "role": "user",
-            "content": (
+            "content": _with_images(
                 "Read the header block of this source document and return the "
                 "identifying fields below.\n"
                 f"{chr(10).join(lines)}\n\n"
-                "Document:\n\n" + document
+                "Document:\n\n" + document,
+                images or [],
             ),
         },
     ]
 
 
-def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> list[dict[str, str]]:
+def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any],
+                images: Optional[list[tuple[int, str]]] = None) -> list[dict[str, Any]]:
     lines = [f"Form: {form.get('form_name')} ({form.get('form_id')}, "
              f"version {form.get('form_version')})",
              f"Description: {form.get('form_description') or '—'}", ""]
@@ -304,10 +373,10 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
     )
 
     return [
-        {"role": "system", "content": RULES},
+        {"role": "system", "content": RULES + (IMAGE_RULES if images else "")},
         {
             "role": "user",
-            "content": (
+            "content": _with_images(
                 "Transcribe this source document into the CRF below. Use the exact "
                 "section_id, group_id and field_id given. For a repeating group, create one "
                 "instance per row of data present on the page — do not pad out empty rows.\n\n"
@@ -319,7 +388,8 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any]) -> 
                 "leave it out rather than borrowing from a neighbouring block.\n\n"
                 + "\n".join(lines)
                 + (f"\nConfirmed header context: {context}\n" if context else "")
-                + "\nDocument:\n\n" + document
+                + "\nDocument:\n\n" + document,
+                images or [],
             ),
         },
     ]
@@ -482,6 +552,13 @@ async def _complete(messages: list[Any], schema: dict[str, Any],
                     "The field-extraction service rejected our credentials. "
                     "Please contact your administrator."
                 ) from exc
+            if exc.response.status_code == 429 and _unsupported(
+                detail, "insufficient_quota", "credit_balance_exhausted"
+            ):
+                raise ExtractionUnavailable(
+                    "The field-extraction account has run out of credits. "
+                    "Please contact your administrator."
+                ) from exc
             if exc.response.status_code == 429:
                 raise ExtractionUnavailable(
                     "The field-extraction service is busy. Please try again in a moment."
@@ -560,6 +637,8 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     except (TypeError, ValueError):
         confidence = 0.5
     page = row.get("page")
+    struck = row.get("struck_value")
+    struck = str(struck).strip() or None if struck is not None else None
     return {
         "field_id": field_id,
         "value": value,
@@ -567,28 +646,66 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
         "locator": locator,
         "page": int(page) if isinstance(page, (int, float)) and page else None,
         "confidence": max(0.0, min(1.0, confidence)),
+        "corrected": bool(row.get("corrected")) or struck is not None,
+        "struck_value": struck,
     }
 
 
-async def extract_header(document: str) -> dict[str, Any]:
-    result = await _complete(
-        header_prompt(document), HEADER_SCHEMA, "crf_header",
-        timeout=HEADER_TIMEOUT, max_tokens=HEADER_MAX_TOKENS,
-    )
+async def extract_header(document: str,
+                         pages: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    images = page_images(pages)
+    # An image prompt takes longer to start answering than a page of text.
+    timeout = max(HEADER_TIMEOUT, 60.0) if images else HEADER_TIMEOUT
+    second_model = second_read_model() if images else None
+    reads = [_complete(header_prompt(document, images), HEADER_SCHEMA, "crf_header",
+                       timeout=timeout, max_tokens=HEADER_MAX_TOKENS)]
+    if second_model:
+        # A reasoning model spends part of its budget thinking; the small cap
+        # that keeps the first read from stalling would cut it off mid-answer.
+        reads.append(_complete(header_prompt(document, images), HEADER_SCHEMA, "crf_header",
+                               model=second_model, timeout=timeout,
+                               max_tokens=HEADER_MAX_TOKENS * 5))
+    gathered = await asyncio.gather(*reads, return_exceptions=True)
+    if isinstance(gathered[0], BaseException):
+        raise gathered[0]
+
     allowed = set(cronos.HEADER_FIELD_IDS)
-    rows: dict[str, dict[str, Any]] = {}
-    for raw in result.get("values") or []:
-        row = _clean(raw)
-        if row and row["field_id"] in allowed and row["field_id"] not in rows:
-            rows[row["field_id"]] = row
-    return {"values": list(rows.values()), "usage": result.get("_usage", {})}
+
+    def rows_of(result: dict[str, Any]) -> list[dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        for raw in result.get("values") or []:
+            row = _clean(raw)
+            if row and row["field_id"] in allowed and row["field_id"] not in rows:
+                rows[row["field_id"]] = row
+        return list(rows.values())
+
+    second = None
+    usages = [gathered[0]]
+    if second_model:
+        if isinstance(gathered[1], BaseException):
+            log.warning("second header read on %s failed: %s", second_model, gathered[1])
+        else:
+            second = rows_of(gathered[1])
+            usages.append(gathered[1])
+    return {"values": reconcile(rows_of(gathered[0]), second),
+            "usage": _merge_usage(usages)}
 
 
 def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
     prompt = completion = 0
     models: list[str] = []
+    by_model: dict[str, dict[str, int]] = {}
     for part in parts:
         usage = part.get("_usage") or {}
+        # A part can itself be a merge (one per section) that already split by model.
+        nested = usage.get("by_model")
+        entries = ([{"model": name, **counts} for name, counts in nested.items()]
+                   if nested else [usage])
+        for inner in entries:
+            name = inner.get("model") or model_name()
+            tally = by_model.setdefault(name, {"prompt_tokens": 0, "completion_tokens": 0})
+            tally["prompt_tokens"] += inner.get("prompt_tokens") or 0
+            tally["completion_tokens"] += inner.get("completion_tokens") or 0
         prompt += usage.get("prompt_tokens") or 0
         completion += usage.get("completion_tokens") or 0
         if usage.get("model"):
@@ -597,11 +714,14 @@ def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
         "prompt_tokens": prompt or None,
         "completion_tokens": completion or None,
         "model": models[0] if models else model_name(),
+        "by_model": by_model,
     }
 
 
 async def _extract_sections(document: str, form: dict[str, Any],
-                            header: dict[str, Any]) -> dict[str, Any]:
+                            header: dict[str, Any],
+                            images: Optional[list[tuple[int, str]]] = None,
+                            model: Optional[str] = None) -> dict[str, Any]:
     """One completion per CRF, in parallel — wall clock is the slowest section.
 
     A visit with two CRFs was a single 70s call. Splitting keeps each prompt to
@@ -609,12 +729,14 @@ async def _extract_sections(document: str, form: dict[str, Any],
     """
     sections = form.get("sections") or []
     if len(sections) <= 1:
-        return await _complete(form_prompt(document, form, header), FORM_SCHEMA, "crf_form")
+        return await _complete(form_prompt(document, form, header, images),
+                               FORM_SCHEMA, "crf_form", model=model)
 
     async def one(section: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         mini = {**form, "sections": [section]}
-        result = await _complete(form_prompt(document, mini, header), FORM_SCHEMA, "crf_form")
+        result = await _complete(form_prompt(document, mini, header, images),
+                                 FORM_SCHEMA, "crf_form", model=model)
         log.info("section %s (%s) read in %.1fs (%s value(s))",
                  section.get("section_id"), section.get("name"),
                  time.monotonic() - started, len(result.get("values") or []))
@@ -639,10 +761,118 @@ async def _extract_sections(document: str, form: dict[str, Any],
     return {"values": merged, "_usage": _merge_usage(usages)}
 
 
-async def extract_form(document: str, form: dict[str, Any],
-                       header: dict[str, Any]) -> dict[str, Any]:
-    result = await _extract_sections(document, form, header)
+def second_read_model() -> Optional[str]:
+    """The model for the independent second read, or None when it is turned off.
 
+    A second read is what makes a confidence worth trusting: a model's own score
+    is poorly calibrated, but two reads that disagree are a fact. A different
+    model makes the reads more independent; the same model still catches
+    unstable readings of a hard digit.
+    """
+    configured_model = (os.getenv("OPENAI_SECOND_READ_MODEL") or "").strip()
+    if configured_model.lower() in {"off", "none", "0", "false"}:
+        return None
+    return configured_model or model_name()
+
+
+# Two reads that disagree, or a value the page shows was corrected, are where a
+# reviewer has to look — the score says so even if the model was sure.
+DISAGREE_CONFIDENCE = 0.4
+CORRECTED_CONFIDENCE = 0.75
+_COMPARABLE = re.compile(r"[^0-9a-z.]+")
+
+
+def _same_value(a: Optional[str], b: Optional[str]) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    left, right = _COMPARABLE.sub("", a.lower()), _COMPARABLE.sub("", b.lower())
+    if left == right:
+        return True
+    try:
+        return float(left) == float(right)
+    except ValueError:
+        return False
+
+
+def _address_key(row: dict[str, Any]) -> tuple:
+    # Header rows carry only a field id.
+    return (row.get("section_id"), row.get("group_id"), row.get("instance", 1),
+            row["field_id"])
+
+
+def reconcile(first: list[dict[str, Any]],
+              second: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """One row per field, scored by whether two independent reads agree."""
+    if second is None:
+        for row in first:
+            if row["corrected"]:
+                row["confidence"] = min(row["confidence"], CORRECTED_CONFIDENCE)
+        return first
+
+    others = {_address_key(row): row for row in second}
+    out: list[dict[str, Any]] = []
+    for row in first:
+        other = others.pop(_address_key(row), None)
+        other_value = other["value"] if other else None
+        row["reads"] = 2
+        if _same_value(row["value"], other_value):
+            row["agreed"] = True
+            if other:
+                row["confidence"] = round((row["confidence"] + other["confidence"]) / 2, 3)
+                row["corrected"] = row["corrected"] or other["corrected"]
+                row["struck_value"] = row["struck_value"] or other["struck_value"]
+        else:
+            row["agreed"] = False
+            row["second_value"] = other_value
+            row["confidence"] = min(row["confidence"], DISAGREE_CONFIDENCE)
+        if row["corrected"]:
+            row["confidence"] = min(row["confidence"], CORRECTED_CONFIDENCE)
+        out.append(row)
+
+    # A value only the second read found is kept, so it can be checked rather
+    # than lost, but it is scored as the disagreement it is.
+    for row in others.values():
+        if row["value"] is None:
+            continue
+        out.append({**row, "reads": 2, "agreed": False, "second_value": None,
+                    "confidence": min(row["confidence"], DISAGREE_CONFIDENCE)})
+    return out
+
+
+async def extract_form(document: str, form: dict[str, Any], header: dict[str, Any],
+                       pages: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    images = page_images(pages)
+    second_model = second_read_model() if images else None
+    reads = [_extract_sections(document, form, header, images)]
+    if second_model:
+        reads.append(_extract_sections(document, form, header, images, model=second_model))
+    gathered = await asyncio.gather(*reads, return_exceptions=True)
+    if isinstance(gathered[0], BaseException):
+        raise gathered[0]
+
+    first = _form_rows(gathered[0], form)
+    second: Optional[list[dict[str, Any]]] = None
+    usages = [gathered[0]]
+    if second_model:
+        if isinstance(gathered[1], BaseException):
+            # The second read only calibrates the first. Losing it costs the
+            # agreement check, never the values.
+            log.warning("second read on %s failed: %s", second_model, gathered[1])
+        else:
+            second = _form_rows(gathered[1], form)["values"]
+            usages.append(gathered[1])
+
+    values = reconcile(first["values"], second)
+    if second is not None:
+        log.info("second read on %s: %s of %s value(s) disagree", second_model,
+                 sum(1 for row in values if not row.get("agreed")), len(values))
+    return {**first, "values": values, "images": len(images),
+            "second_read": second_model if second is not None else None,
+            "usage": _merge_usage(usages)}
+
+
+def _form_rows(result: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
+    """The model's rows, addressed to fields the form really has."""
     valid = {
         (section["section_id"], (group or {}).get("group_id"), field["field_id"])
         for section, group, field in cronos.iter_fields(form)

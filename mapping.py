@@ -174,6 +174,32 @@ def _unticked_only(evidence: Optional[str]) -> bool:
     return bool(_UNTICKED.search(evidence)) and not _TICKED.search(evidence)
 
 
+def _reading(row: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """How the value was read: a correction on the page, and a second read."""
+    row = row or {}
+    reading: dict[str, Any] = {}
+    if row.get("corrected"):
+        reading["corrected"] = True
+        reading["struck_value"] = row.get("struck_value")
+    if row.get("reads"):
+        reading["reads"] = row["reads"]
+        reading["agreed"] = bool(row.get("agreed"))
+        if not row.get("agreed"):
+            reading["second_value"] = row.get("second_value")
+    return reading or None
+
+
+def _reading_issues(reading: Optional[dict[str, Any]]) -> list[str]:
+    if not reading:
+        return []
+    issues = []
+    if reading.get("corrected"):
+        issues.append("corrected_on_page")
+    if reading.get("reads", 1) > 1 and not reading.get("agreed"):
+        issues.append("reads_disagree")
+    return issues
+
+
 def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
                  index: Optional[anchors.PageIndex], key: str,
                  region: Optional[list] = None) -> dict[str, Any]:
@@ -210,6 +236,8 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
             source["page"] = region[0][0]
     if value is not None and confidence is not None and confidence < LOW_CONFIDENCE:
         issues.append("low_confidence")
+    reading = _reading(row)
+    issues.extend(_reading_issues(reading))
 
     built = {
         "key": key,
@@ -226,6 +254,8 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
         "issues": issues,
         "source": source,
     }
+    if reading:
+        built["reading"] = reading
     for key in ("unit", "options", "required", "min", "max", "derived"):
         if field.get(key) is not None:
             built[key] = field[key]
@@ -526,6 +556,10 @@ def revalidate(payload: dict[str, Any]) -> dict[str, Any]:
                 source["match"] = "edited"
                 field["confidence"] = None
             field["source"] = source
+
+            # A reviewer who changed the value has made the call the flags ask for.
+            if not edited:
+                issues.extend(_reading_issues(field.get("reading")))
 
             if value is None:
                 field["status"] = "manual" if edited else "empty"
