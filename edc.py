@@ -17,9 +17,11 @@ redirect away from the endpoint *is* the "no such visit" answer.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,9 +37,15 @@ TIMEOUT = 60.0
 # Enough for a page of dense CRF crops; the API's own ceiling is 5 MB per image.
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
+_fixture_lock = asyncio.Lock()
+
 
 class EdcUnavailable(RuntimeError):
     """The EDC could not be reached, or answered with something we can't use."""
+
+
+def _is_production() -> bool:
+    return (os.getenv("APP_ENV") or "").strip().lower() == "production"
 
 
 # --------------------------------------------------------------------------- offline
@@ -88,64 +96,84 @@ def _fixture_visit(path: Path, protocol_no: str, screening_no: str,
     )
 
 
-def _fixture_save(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+def _write_fixtures(path: Path, data: dict[str, Any]) -> None:
+    """Atomic write so a crashed save cannot leave a half-written JSON file."""
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+async def _fixture_save(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
     """Write values back into the fixture, the way a working EDC would.
 
     Fields are matched on `field_id` where the payload carries one and on name
     otherwise — which is what the live deployment was measured doing, and why
     duplicate names collapsed there. Keeping both behaviours means the fixture
     can reproduce either.
+
+    One asyncio lock covers the whole read-modify-write so concurrent demo
+    saves cannot drop each other's updates. Production refuses fixtures.
     """
-    data = _read_fixtures(path)
-    target = next(
-        (v for v in data.get("visits") or []
-         if _matches(v, str(payload.get("protocolNo")), str(payload.get("screeningNo")),
-                     str(payload.get("visitName")))),
-        None,
-    )
-    if target is None:
-        raise EdcUnavailable("The EDC did not recognise that visit.")
+    async with _fixture_lock:
+        data = _read_fixtures(path)
+        target = next(
+            (v for v in data.get("visits") or []
+             if _matches(v, str(payload.get("protocolNo")), str(payload.get("screeningNo")),
+                         str(payload.get("visitName")))),
+            None,
+        )
+        if target is None:
+            raise EdcUnavailable("The EDC did not recognise that visit.")
 
-    next_image = max(
-        [f.get("imageId") or 0 for crf in target["crfs"] for f in crf["fields"]] + [0]
-    )
-    report = []
-    for incoming in payload.get("crfs") or []:
-        crf = next((c for c in target["crfs"] if c.get("crfId") == incoming.get("crfId")), None)
-        if crf is None:
-            continue
-        by_id = {f.get("field_id"): f for f in crf["fields"] if f.get("field_id") is not None}
-        for sent in incoming.get("fields") or []:
-            found = by_id.get(sent.get("field_id"))
-            if found is None:
-                found = next((f for f in crf["fields"]
-                              if (f.get("field_name") or f.get("fieldName")) == sent.get("fieldName")),
-                             None)
-            if found is not None:
-                found["value"] = sent.get("value", "")
+        next_image = max(
+            [f.get("imageId") or 0 for crf in target["crfs"] for f in crf["fields"]] + [0]
+        )
+        report = []
+        for incoming in payload.get("crfs") or []:
+            crf = next((c for c in target["crfs"] if c.get("crfId") == incoming.get("crfId")), None)
+            if crf is None:
+                continue
+            by_id = {f.get("field_id"): f for f in crf["fields"] if f.get("field_id") is not None}
+            for sent in incoming.get("fields") or []:
+                found = by_id.get(sent.get("field_id"))
+                if found is None:
+                    found = next((f for f in crf["fields"]
+                                  if (f.get("field_name") or f.get("fieldName")) == sent.get("fieldName")),
+                                 None)
+                if found is not None:
+                    found["value"] = sent.get("value", "")
 
-        images = []
-        for image in incoming.get("images") or []:
-            next_image += 1
-            images.append({"fileName": image.get("fileName"), "status": "Saved",
-                           "imageId": next_image})
-            slot = by_id.get(image.get("field_id"))
-            if slot is None:
-                slot = next((f for f in crf["fields"]
-                             if (f.get("field_name") or f.get("fieldName")) == image.get("fieldName")),
-                            None)
-            if slot is not None:
-                slot["hasImage"] = True
-                slot["imageId"] = next_image
-        report.append({"crfName": crf.get("crfName"), "crfId": crf.get("crfId"),
-                       "status": "Saved", "images": images})
+            images = []
+            for image in incoming.get("images") or []:
+                next_image += 1
+                images.append({"fileName": image.get("fileName"), "status": "Saved",
+                               "imageId": next_image})
+                slot = by_id.get(image.get("field_id"))
+                if slot is None:
+                    slot = next((f for f in crf["fields"]
+                                 if (f.get("field_name") or f.get("fieldName")) == image.get("fieldName")),
+                                None)
+                if slot is not None:
+                    slot["hasImage"] = True
+                    slot["imageId"] = next_image
+            report.append({"crfName": crf.get("crfName"), "crfId": crf.get("crfId"),
+                           "status": "Saved", "images": images})
 
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info("edc fixture: saved into %s", path)
-    return {"success": True, "protocolNo": payload.get("protocolNo"),
-            "screeningNo": payload.get("screeningNo"),
-            "visitName": payload.get("visitName"), "crfs": report,
-            "message": "CRF data saved successfully.", "fixture": True}
+        _write_fixtures(path, data)
+        log.info("edc fixture: saved into %s", path)
+        return {"success": True, "protocolNo": payload.get("protocolNo"),
+                "screeningNo": payload.get("screeningNo"),
+                "visitName": payload.get("visitName"), "crfs": report,
+                "message": "CRF data saved successfully.", "fixture": True}
 
 
 def base_url() -> str:
@@ -153,8 +181,14 @@ def base_url() -> str:
 
 
 def configured() -> bool:
-    """True when a base URL is set — the dev host is the default, so always."""
-    return bool(base_url())
+    """True when the EDC base URL is set to something other than the vendor default
+    in production; in development the default still counts as configured."""
+    url = base_url()
+    if not url:
+        return False
+    if _is_production() and url == DEFAULT_BASE_URL.rstrip("/"):
+        return False
+    return True
 
 
 def _headers() -> dict[str, str]:
@@ -247,7 +281,7 @@ async def save_visit(payload: dict[str, Any]) -> dict[str, Any]:
     """Send field values and their source crops back to the EDC."""
     offline = fixtures()
     if offline:
-        return _fixture_save(offline, payload)
+        return await _fixture_save(offline, payload)
 
     data = await _request("POST", "/api/EDC/SaveVisitCRFData", json=payload)
     if not isinstance(data, dict):

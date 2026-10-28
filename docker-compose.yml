@@ -1,0 +1,47 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      APP_ENV: ${APP_ENV:-production}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      PORT: "8000"
+    volumes:
+      - ./users.json:/app/users.json:ro
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:

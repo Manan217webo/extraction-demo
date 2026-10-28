@@ -11,6 +11,9 @@ the app fails.
 
 Checks run in dependency order and each says what to do about a failure. Exits
 non-zero if anything is a hard failure, so it can gate a deploy step.
+
+With APP_ENV=production, fixtures, the Cronos dev host, a missing vision
+backend, empty users, unreachable Redis, and unsaveable fields are FAILs.
 """
 
 from __future__ import annotations
@@ -27,9 +30,11 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
+import auth  # noqa: E402
 import cronos  # noqa: E402
 import edc  # noqa: E402
 import fields  # noqa: E402
+import store  # noqa: E402
 import vision  # noqa: E402
 import visit_forms  # noqa: E402
 
@@ -41,6 +46,10 @@ PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 _MARK = {PASS: "  ok  ", WARN: " warn ", FAIL: " FAIL "}
 
 results: list[tuple[str, str, str]] = []
+
+
+def production() -> bool:
+    return auth.is_production()
 
 
 def record(status: str, title: str, detail: str) -> str:
@@ -106,7 +115,8 @@ def check_box_placement() -> None:
     elif backend == "tesseract":
         record(PASS, "Highlight boxes", "local Tesseract")
     else:
-        record(WARN, "Highlight boxes",
+        status = FAIL if production() else WARN
+        record(status, "Highlight boxes",
                "no backend available — boxes fall back to interpolating inside the "
                "parser's table rectangle and will drift. Set OPENAI_VISION_MODEL.")
 
@@ -116,9 +126,44 @@ def check_fixture_mode() -> None:
     if offline is None:
         record(PASS, "EDC target", "live EDC (fixtures off)")
         return
-    record(WARN, "EDC target",
+    status = FAIL if production() else WARN
+    record(status, "EDC target",
            f"EDC_FIXTURES is set to {offline} — saves write to that file and report "
-           "success without reaching the EDC. Unset it before the demo.")
+           "success without reaching the EDC. Unset it before production.")
+
+
+def check_edc_host() -> None:
+    url = edc.base_url()
+    if url == edc.DEFAULT_BASE_URL.rstrip("/"):
+        status = FAIL if production() else WARN
+        record(status, "EDC_BASE_URL",
+               f"still the Cronos dev host ({url}). Set EDC_BASE_URL to the "
+               "customer's EDC before production.")
+    else:
+        record(PASS, "EDC_BASE_URL", url)
+
+
+def check_users() -> None:
+    users = auth.load_users()
+    if users:
+        record(PASS, "Reviewer accounts",
+               f"{len(users)} user(s) in {auth.users_path()}")
+        return
+    status = FAIL if production() else WARN
+    record(status, "Reviewer accounts",
+           f"no users in {auth.users_path()} — run "
+           "`uv run scripts/add_user.py <name>` before go-live.")
+
+
+async def check_redis() -> None:
+    ok = await store.ping()
+    if ok:
+        record(PASS, "Redis", store.redis_url())
+        return
+    status = FAIL if production() else WARN
+    record(status, "Redis",
+           f"unreachable at {store.redis_url()} — login and job state need Redis. "
+           "Start it with `docker compose up -d redis`.")
 
 
 def check_local_definitions() -> None:
@@ -164,7 +209,8 @@ async def check_edc_visit() -> None:
 
     unsaveable = visit_forms.unsaveable(definition)
     if unsaveable:
-        record(WARN, "Ambiguous field names",
+        status = FAIL if production() else WARN
+        record(status, "Ambiguous field names",
                f"{len(unsaveable)} CRF(s) have repeated field names with no field_id "
                "to tell them apart; some values would collide on save.")
     else:
@@ -175,15 +221,20 @@ async def check_edc_visit() -> None:
 
 
 async def main() -> int:
-    print(f"\nextraction-demo preflight — {ROOT}\n")
+    env = "production" if production() else "development"
+    print(f"\nextraction-demo preflight — {ROOT} ({env})\n")
     check_python()
     check_env_file()
     check_document_reader()
     check_field_extraction()
     check_box_placement()
     check_local_definitions()
+    check_edc_host()
     check_fixture_mode()
+    check_users()
+    await check_redis()
     await check_edc_visit()
+    await store.close()
 
     failures = [r for r in results if r[0] == FAIL]
     warnings = [r for r in results if r[0] == WARN]

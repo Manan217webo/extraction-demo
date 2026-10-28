@@ -29,6 +29,19 @@ const els = {
   popTotal: $("pop-total"),
   popRenews: $("pop-renews"),
 
+  loginOverlay: $("login-overlay"),
+  loginForm: $("login-form"),
+  loginUsername: $("login-username"),
+  loginPassword: $("login-password"),
+  loginError: $("login-error"),
+  loginSubmit: $("login-submit"),
+  userChip: $("user-chip"),
+  userName: $("user-name"),
+  logoutBtn: $("logout-btn"),
+  recentBtn: $("recent-btn"),
+  recentMenu: $("recent-menu"),
+  tabBanner: $("tab-banner"),
+
   processing: $("processing"),
   processingTitle: $("processing-title"),
   processingFile: $("processing-file"),
@@ -125,6 +138,9 @@ const state = {
   forms: [],
   payload: null,
   selectedKey: null,
+  username: null,
+  readOnly: false,
+  tabId: Math.random().toString(36).slice(2),
 };
 
 const STAGE_ORDER = ["upload", "queue", "read", "finish", "fields"];
@@ -154,13 +170,22 @@ function activeMode() {
   return state.modes.find((m) => m.id === state.modeId) || state.modes[0] || null;
 }
 
+let onUnauthorized = null;
+
 async function api(path, options) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, {
+    credentials: "same-origin",
+    ...(options || {}),
+  });
   let data = {};
   try {
     data = await response.json();
   } catch {
     /* non-JSON responses fall through to the generic message below */
+  }
+  if (response.status === 401 && path !== "/api/login") {
+    if (typeof onUnauthorized === "function") onUnauthorized();
+    throw new Error(data.detail || "Please sign in to continue.");
   }
   if (!response.ok) {
     const detail = Array.isArray(data.detail)
@@ -421,7 +446,7 @@ async function runExtraction() {
   state.fileBytes = null;
   state.savedName = null;
   state.bytesDropped = false;
-  clearSession();
+  clearCurrentPointer();
   startProcessing();
 
   const body = new FormData();
@@ -622,6 +647,7 @@ function showResult(data, landing, options = {}) {
   els.viewer.classList.remove("hidden");
   document.body.classList.add("viewing");
   els.extractedScroll.scrollTop = 0;
+  if (data.job_id && !options.preserveMapping) wireTabLease(data.job_id);
   // Tables and images settle a frame later; pin the reader back to the first page.
   requestAnimationFrame(() => {
     els.extractedScroll.scrollTop = 0;
@@ -642,9 +668,11 @@ function closeViewer() {
   resetMapping();
   state.fileBytes = null;
   state.savedName = null;
-  clearSession();
+  clearCurrentPointer();
+  wireTabLease(null);
   els.fileInput.value = "";
   setFile(null);
+  renderRecentMenu().catch(() => {});
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -799,15 +827,27 @@ function wireSplitter() {
    value read and every correction made. The parse is the expensive part and it
    cannot be repeated for free, so the reviewed state is kept in the browser and
    restored on the way back in. IndexedDB rather than localStorage because the
-   PDF's own bytes go in with it, and those run to megabytes. */
+   PDF's own bytes go in with it, and those run to megabytes.
 
-const STORE_DB = "webo-extraction";
+   Each reviewer gets their own database (`webo-extraction:{username}`). Snapshots
+   are keyed by job id so two visits in the same browser stay intact; `current`
+   is only a pointer to the last one. */
+
 const STORE_NAME = "session";
-const STORE_KEY = "current";
+const CURRENT_KEY = "current";
+const MAX_REVIEWS = 10;
+
+function storeDbName() {
+  return state.username ? `webo-extraction:${state.username}` : "webo-extraction";
+}
+
+function reviewKey(jobId) {
+  return `review:${jobId}`;
+}
 
 function openStore() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(STORE_DB, 1);
+    const request = indexedDB.open(storeDbName(), 1);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(STORE_NAME)) {
         request.result.createObjectStore(STORE_NAME);
@@ -832,10 +872,40 @@ function storeAction(mode, run) {
 
 let saveTimer = null;
 let savingToEdc = false;
+let tabChannel = null;
+
+function setReadOnly(on) {
+  state.readOnly = Boolean(on);
+  document.body.classList.toggle("read-only", state.readOnly);
+  if (els.tabBanner) els.tabBanner.classList.toggle("hidden", !state.readOnly);
+}
+
+function wireTabLease(jobId) {
+  if (!("BroadcastChannel" in window)) return;
+  if (tabChannel) {
+    try { tabChannel.close(); } catch { /* already closed */ }
+  }
+  if (!jobId) {
+    setReadOnly(false);
+    return;
+  }
+  tabChannel = new BroadcastChannel("webo-review");
+  tabChannel.onmessage = (event) => {
+    const msg = event.data || {};
+    if (msg.jobId !== jobId || msg.tabId === state.tabId) return;
+    if (msg.type === "claim" || msg.type === "ping") {
+      if (msg.type === "claim") setReadOnly(true);
+      tabChannel.postMessage({ type: "here", jobId, tabId: state.tabId });
+    }
+  };
+  setReadOnly(false);
+  tabChannel.postMessage({ type: "claim", jobId, tabId: state.tabId });
+}
 
 /* Debounced: a reviewer typing through a form would otherwise write the whole
    snapshot on every keystroke. */
 function saveSession() {
+  if (state.readOnly) return;
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
@@ -844,6 +914,7 @@ function saveSession() {
 }
 
 function saveSessionNow() {
+  if (state.readOnly) return Promise.resolve();
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -851,14 +922,81 @@ function saveSessionNow() {
   return writeSession().catch((error) => console.warn("session not saved", error));
 }
 
+function snapshotLabel(snapshot) {
+  const header = snapshot.header || {};
+  const groups = header.groups || [];
+  const values = {};
+  for (const group of groups) {
+    for (const field of group.fields || []) {
+      values[field.field_id] = field.value;
+    }
+  }
+  const protocol = values.protocol_no || "—";
+  const subject = values.subject_no || "—";
+  const visit = values.visit_name || (snapshot.visit && snapshot.visit.visit) || "—";
+  return {
+    title: `${protocol} / ${subject}`,
+    detail: `${visit} · ${snapshot.filename || "document"}`,
+  };
+}
+
+async function listReviews() {
+  if (!state.username) return [];
+  const keys = await storeAction("readonly", (store) => store.getAllKeys());
+  const reviews = [];
+  for (const key of keys || []) {
+    if (typeof key !== "string" || !key.startsWith("review:")) continue;
+    const snapshot = await storeAction("readonly", (store) => store.get(key));
+    if (snapshot && snapshot.jobId) reviews.push(snapshot);
+  }
+  reviews.sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+  return reviews;
+}
+
+async function pruneReviews() {
+  const reviews = await listReviews();
+  if (reviews.length <= MAX_REVIEWS) return;
+  const drop = reviews.slice(MAX_REVIEWS);
+  for (const snapshot of drop) {
+    await storeAction("readwrite", (store) => store.delete(reviewKey(snapshot.jobId)));
+  }
+}
+
+async function renderRecentMenu() {
+  if (!els.recentBtn || !els.recentMenu) return;
+  const reviews = await listReviews();
+  els.recentBtn.classList.toggle("hidden", !state.username);
+  els.recentMenu.innerHTML = "";
+  if (!reviews.length) {
+    const empty = document.createElement("div");
+    empty.className = "recent-empty";
+    empty.textContent = "No saved reviews yet.";
+    els.recentMenu.appendChild(empty);
+    return;
+  }
+  for (const snapshot of reviews) {
+    const label = snapshotLabel(snapshot);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.innerHTML = `<b>${label.title}</b><span>${label.detail}</span>`;
+    button.addEventListener("click", async () => {
+      els.recentMenu.classList.add("hidden");
+      await restoreSession(snapshot.jobId);
+    });
+    els.recentMenu.appendChild(button);
+  }
+}
+
 async function writeSession() {
-  if (!state.result) return;
+  if (!state.result || !state.username) return;
+  const jobId = state.result.job_id;
   const snapshot = {
     savedAt: Date.now(),
     // Which document and which build produced this. A snapshot is only ever
     // restored for the same job, and never from an older build: a mapping
     // saved by yesterday's code shows yesterday's values.
-    jobId: state.result.job_id,
+    jobId,
     build: window.APP_BUILD || null,
     startedAt: state.startedAt,
     result: state.result,
@@ -872,7 +1010,12 @@ async function writeSession() {
     bytes: state.fileBytes || null,
   };
   try {
-    await storeAction("readwrite", (store) => store.put(snapshot, STORE_KEY));
+    await storeAction("readwrite", (store) => {
+      store.put(snapshot, reviewKey(jobId));
+      return store.put(jobId, CURRENT_KEY);
+    });
+    await pruneReviews();
+    renderRecentMenu().catch(() => {});
   } catch (error) {
     // The PDF bytes are the usual quota failure. Keep the review even if the
     // original file cannot be stored — but record that it was dropped, so a
@@ -880,20 +1023,30 @@ async function writeSession() {
     if (!snapshot.bytes) throw error;
     snapshot.bytes = null;
     snapshot.bytesDropped = true;
-    await storeAction("readwrite", (store) => store.put(snapshot, STORE_KEY));
+    await storeAction("readwrite", (store) => {
+      store.put(snapshot, reviewKey(jobId));
+      return store.put(jobId, CURRENT_KEY);
+    });
   }
 }
 
-function readSession() {
-  return storeAction("readonly", (store) => store.get(STORE_KEY));
+async function readSession(jobId) {
+  if (!state.username) return null;
+  let id = jobId;
+  if (!id) {
+    id = await storeAction("readonly", (store) => store.get(CURRENT_KEY));
+  }
+  if (!id) return null;
+  return storeAction("readonly", (store) => store.get(reviewKey(id)));
 }
 
-function clearSession() {
+function clearCurrentPointer() {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  return storeAction("readwrite", (store) => store.delete(STORE_KEY)).catch(() => {});
+  // Keep past reviews; only clear the "resume this one" pointer.
+  return storeAction("readwrite", (store) => store.delete(CURRENT_KEY)).catch(() => {});
 }
 
 /* Restore a review that was in progress, without touching the parser.
@@ -901,10 +1054,10 @@ function clearSession() {
    showResult() wipes mapping state (it is also the entry from a fresh extract),
    so header, visit and form have to be put back afterwards. Confirm header is
    the landing whenever the CRF has not been mapped yet. */
-async function restoreSession() {
+async function restoreSession(jobId) {
   let saved = null;
   try {
-    saved = await readSession();
+    saved = await readSession(jobId);
   } catch (error) {
     console.warn("no session restored", error);
   }
@@ -935,6 +1088,7 @@ async function restoreSession() {
   state.visit = saved.visit || null;
 
   showResult(saved.result, landing, { preserveMapping: true, deferStep: true });
+  wireTabLease(saved.jobId);
 
   enableStep("header");
   if (state.header) {
@@ -956,6 +1110,7 @@ async function restoreSession() {
 
   setStep(landing);
   els.extractedScroll.scrollTop = 0;
+  await storeAction("readwrite", (store) => store.put(saved.jobId, CURRENT_KEY)).catch(() => {});
   return true;
 }
 
@@ -2642,58 +2797,146 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* -------------------------------------------------------------------- boot */
+/* -------------------------------------------------------------------- auth */
 
-(async function boot() {
-  setZoom(1);
-  wireMapping();
-  wireSplitter();
+function showLogin(message) {
+  document.body.classList.add("signed-out");
+  document.body.classList.remove("booting");
+  els.loginOverlay.classList.remove("hidden");
+  els.userChip.classList.add("hidden");
+  if (message) {
+    els.loginError.textContent = message;
+    els.loginError.classList.remove("hidden");
+  } else {
+    els.loginError.classList.add("hidden");
+  }
+  els.loginUsername.focus();
+}
 
-  // Restore the review before anything else so Cmd+R never flashes the upload page.
+function hideLogin() {
+  document.body.classList.remove("signed-out");
+  els.loginOverlay.classList.add("hidden");
+  els.loginError.classList.add("hidden");
+  els.loginPassword.value = "";
+}
+
+function showSignedIn(username) {
+  state.username = username;
+  els.userName.textContent = username;
+  els.userChip.classList.remove("hidden");
+  hideLogin();
+}
+
+async function loadAppSession() {
+  const session = await api("/api/session");
+  state.modes = session.modes || [];
+  const recommended = state.modes.find((m) => m.recommended);
+  state.modeId = recommended ? recommended.id : (state.modes[0] || {}).id;
+  state.ready = Boolean(session.ready);
+  state.mappingReady = Boolean((session.mapping || {}).ready);
+  state.cronos = (session.mapping || {}).cronos || null;
+  els.maxMb.textContent = String(session.max_file_mb || 50);
+  if (!state.mappingReady) {
+    els.stepper.querySelectorAll('button[data-step="header"], button[data-step="form"]')
+      .forEach((button) => {
+        button.title =
+          "CRF mapping isn't configured yet. Please contact your administrator.";
+      });
+  }
+  renderModes();
+  updateRunBar();
+  renderCredits(session.credits);
+  if (!state.ready) {
+    els.setupError.textContent =
+      "The extraction service isn't configured yet. Please contact your administrator before running a document.";
+    els.setupError.classList.remove("hidden");
+  }
+  return session;
+}
+
+async function afterSignIn(username) {
+  showSignedIn(username);
+  await loadAppSession();
+  await renderRecentMenu();
   let restored = false;
   try {
     restored = await restoreSession();
   } catch (error) {
     console.warn("no session restored", error);
   }
-  document.body.classList.remove("booting");
+  if (state.result && !state.header && state.mappingReady) {
+    loadHeader();
+  }
+  return restored;
+}
+
+onUnauthorized = () => {
+  state.username = null;
+  showLogin("Your session ended. Please sign in again.");
+};
+
+els.loginForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  els.loginError.classList.add("hidden");
+  els.loginSubmit.disabled = true;
+  try {
+    const data = await api("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: els.loginUsername.value.trim(),
+        password: els.loginPassword.value,
+      }),
+    });
+    await afterSignIn(data.username);
+  } catch (error) {
+    els.loginError.textContent = error.message || "Incorrect username or password.";
+    els.loginError.classList.remove("hidden");
+  } finally {
+    els.loginSubmit.disabled = false;
+  }
+});
+
+els.logoutBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/logout", { method: "POST" });
+  } catch {
+    /* still clear the local UI */
+  }
+  await clearCurrentPointer();
+  wireTabLease(null);
+  state.username = null;
+  state.result = null;
+  resetMapping();
+  document.body.classList.remove("viewing");
+  els.viewer.classList.add("hidden");
+  showLogin();
+});
+
+els.recentBtn.addEventListener("click", async (event) => {
+  event.stopPropagation();
+  const open = els.recentMenu.classList.contains("hidden");
+  if (open) await renderRecentMenu();
+  els.recentMenu.classList.toggle("hidden");
+  els.recentBtn.setAttribute("aria-expanded", open ? "true" : "false");
+});
+document.addEventListener("click", () => {
+  if (els.recentMenu) els.recentMenu.classList.add("hidden");
+});
+
+/* -------------------------------------------------------------------- boot */
+
+(async function boot() {
+  setZoom(1);
+  wireMapping();
+  wireSplitter();
+  document.body.classList.add("signed-out");
 
   try {
-    const session = await api("/api/session");
-    state.modes = session.modes || [];
-    const recommended = state.modes.find((m) => m.recommended);
-    state.modeId = recommended ? recommended.id : (state.modes[0] || {}).id;
-    state.ready = Boolean(session.ready);
-    state.mappingReady = Boolean((session.mapping || {}).ready);
-    state.cronos = (session.mapping || {}).cronos || null;
-    els.maxMb.textContent = String(session.max_file_mb || 50);
-    if (!state.mappingReady) {
-      els.stepper.querySelectorAll('button[data-step="header"], button[data-step="form"]')
-        .forEach((button) => {
-          button.title =
-            "CRF mapping isn't configured yet. Please contact your administrator.";
-        });
-    }
-
-    renderModes();
-    updateRunBar();
-    renderCredits(session.credits);
-
-    if (!state.ready) {
-      els.setupError.textContent =
-        "The extraction service isn't configured yet. Please contact your administrator before running a document.";
-      els.setupError.classList.remove("hidden");
-    }
-
-    // Last, so a restored review lands on top of a fully wired page.
-    if (!restored) await restoreSession();
-    if (state.result && !state.header && state.mappingReady) {
-      loadHeader();
-    }
+    const me = await api("/api/me");
+    document.body.classList.remove("booting");
+    await afterSignIn(me.username);
   } catch {
-    if (restored) return;
-    els.setupError.textContent =
-      "We couldn't reach the extraction service. Check that the server is running and refresh this page.";
-    els.setupError.classList.remove("hidden");
+    showLogin();
   }
 })();

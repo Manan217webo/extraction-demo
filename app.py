@@ -13,6 +13,7 @@ import mimetypes
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
@@ -25,19 +26,23 @@ mimetypes.add_type("text/javascript", ".mjs")
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import llama_cloud
 from llama_cloud import AsyncLlamaCloud
 
 import anchors
+import auth
 import cronos
 import edc
 import fields
 import mapping
+import store
 import vision
 import visit_forms
 from docx_export import build_docx
@@ -58,9 +63,19 @@ STATIC_DIR = BASE_DIR / "static"
 MAX_BYTES = 50 * 1024 * 1024
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 HEADER_PAGE_LIMIT = max(1, int(os.getenv("HEADER_PAGE_LIMIT") or 3))
+MAX_CONCURRENT_READS = max(1, int(os.getenv("MAX_CONCURRENT_READS") or 3))
 API_BASE = (os.getenv("LLAMA_CLOUD_BASE_URL") or "https://api.cloud.llamaindex.ai").rstrip("/")
-
 GENERIC_FAILURE = "We couldn't process this document. Please try again."
+
+PUBLIC_API_PATHS = {"/api/login", "/healthz"}
+
+
+def _allowed_modes() -> set[str]:
+    raw = (os.getenv("ALLOWED_MODES") or "").strip()
+    if not raw:
+        return set()
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
 
 # Extraction modes, described the way a reviewer thinks about them rather than in
 # vendor terminology. `id` is the only value that crosses the vendor boundary.
@@ -120,14 +135,61 @@ TIER_FOR_MODE = {
 }
 DEFAULT_MODE = "high"
 
-app = FastAPI(title="Webo Healthtech Document Extraction")
-
-_jobs: dict[str, dict[str, Any]] = {}
 _client: Optional[AsyncLlamaCloud] = None
 _org_id: Optional[str] = None
 _credits_cache: dict[str, Any] = {"at": 0.0, "value": None}
 _credits_lock = asyncio.Lock()
-_header_inflight: dict[str, asyncio.Task] = {}
+_read_sem = asyncio.Semaphore(MAX_CONCURRENT_READS)
+
+
+def _visible_modes() -> list[dict[str, Any]]:
+    allowed = _allowed_modes()
+    if not allowed:
+        return MODES
+    return [mode for mode in MODES if mode["id"] in allowed]
+
+
+def _production_guard() -> None:
+    """Refuse to start when APP_ENV=production and required settings are missing."""
+    if not auth.is_production():
+        return
+    problems: list[str] = []
+    edc_url = (os.getenv("EDC_BASE_URL") or "").strip().rstrip("/")
+    if not edc_url or edc_url == edc.DEFAULT_BASE_URL.rstrip("/"):
+        problems.append("EDC_BASE_URL must be set to the customer's EDC (not the Cronos dev host)")
+    if (os.getenv("EDC_FIXTURES") or "").strip():
+        problems.append("EDC_FIXTURES must be unset in production")
+    if not (os.getenv("REDIS_URL") or "").strip():
+        problems.append("REDIS_URL must be set in production")
+    if not auth.load_users():
+        problems.append(f"USERS_FILE is empty — add reviewers with scripts/add_user.py ({auth.users_path()})")
+    if not vision.configured():
+        problems.append("Set OPENAI_VISION_MODEL or install Tesseract (TESSERACT_CMD)")
+    if problems:
+        raise RuntimeError(
+            "Production startup refused:\n  - " + "\n  - ".join(problems)
+        )
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    _production_guard()
+    if not await store.ping():
+        if auth.is_production():
+            raise RuntimeError(f"Redis is unreachable at {store.redis_url()}")
+        log.warning("Redis is unreachable at %s — login and job state will fail", store.redis_url())
+    yield
+    await store.close()
+
+
+app = FastAPI(title="Webo Healthtech Document Extraction", lifespan=lifespan)
+
+_hosts = (os.getenv("ALLOWED_HOSTS") or "").strip()
+if _hosts:
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=[h.strip() for h in _hosts.split(",") if h.strip()],
+    )
 
 
 # --------------------------------------------------------------------------- config
@@ -325,7 +387,7 @@ def _pages_from(container: Any, field: str) -> list[dict[str, Any]]:
     return out
 
 
-def _layout_pages(result: Any) -> list[dict[str, Any]]:
+def _layout_pages(result: Any, job_id: Optional[str] = None) -> list[dict[str, Any]]:
     """Plain-dict view of the parser's layout items, bounding boxes included."""
     container = getattr(result, "items", None)
     out: list[dict[str, Any]] = []
@@ -335,24 +397,26 @@ def _layout_pages(result: Any) -> list[dict[str, Any]]:
             out.append(dump(mode="json") if dump else dict(page))
         except Exception as exc:  # a page we cannot read simply cannot be anchored
             log.warning("layout page skipped: %s", exc)
-    _dump_layout(out)
+    _dump_layout(out, job_id)
     return out
 
 
-def _dump_layout(pages: list[dict[str, Any]]) -> None:
-    """Write the raw layout to disk when DEBUG_LAYOUT_DIR is set.
+def _debug_layout_dir() -> Optional[str]:
+    if auth.is_production():
+        return None
+    return (os.getenv("DEBUG_LAYOUT_DIR") or "").strip() or None
 
-    Highlight placement can only be reasoned about against what the parser
-    actually returns — the box shapes, whether they carry character ranges, how a
-    table is split. Keeping a copy means that work does not cost a re-parse.
-    """
-    directory = (os.getenv("DEBUG_LAYOUT_DIR") or "").strip()
+
+def _dump_layout(pages: list[dict[str, Any]], job_id: Optional[str] = None) -> None:
+    """Write the raw layout to disk when DEBUG_LAYOUT_DIR is set (never in production)."""
+    directory = _debug_layout_dir()
     if not directory or not pages:
         return
     try:
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
-        path = target / "layout.json"
+        name = f"layout-{job_id}.json" if job_id else "layout.json"
+        path = target / name
         path.write_text(json.dumps(pages, indent=2, ensure_ascii=False), encoding="utf-8")
         log.info("layout written to %s", path)
     except Exception as exc:
@@ -388,6 +452,45 @@ def _serialize(result: Any, meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- auth / job ownership
+
+
+class _AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+            token = request.cookies.get(auth.COOKIE_NAME)
+            try:
+                username = await auth.user_from_token(store.get_redis(), token)
+            except Exception as exc:
+                log.warning("session lookup failed: %s", exc)
+                username = None
+            if not username:
+                return JSONResponse(
+                    {"detail": "Please sign in to continue."},
+                    status_code=401,
+                )
+            request.state.user = username
+        return await call_next(request)
+
+
+app.add_middleware(_AuthMiddleware)
+
+
+async def _current_user(request: Request) -> str:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="Please sign in to continue.")
+    return user
+
+
+async def _owned_job(job_id: str, username: str) -> dict[str, Any]:
+    meta = await store.get_job(job_id)
+    if meta is None or meta.get("owner") != username:
+        raise HTTPException(status_code=404, detail="That extraction could not be found.")
+    return meta
+
+
 # --------------------------------------------------------------------------- routes
 
 
@@ -395,17 +498,49 @@ _ASSET_REF = re.compile(r'(src|href)="(/static/[^"?]+)"')
 
 
 def _asset_stamp() -> str:
-    """A token that changes whenever any local asset does.
-
-    Without it a browser holding an older bundle shows an older flow, and there
-    is nothing on the page to say the code it is running is not the code on
-    disk — a stale build is indistinguishable from a bug.
-    """
+    """A token that changes whenever any local asset does."""
     newest = 0.0
     for path in STATIC_DIR.rglob("*"):
         if path.is_file():
             newest = max(newest, path.stat().st_mtime)
     return f"{int(newest)}"
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, Any]:
+    ok = await store.ping()
+    if not ok:
+        return JSONResponse({"ok": False, "redis": False}, status_code=503)
+    return {"ok": True, "redis": True}
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+async def login(request: LoginRequest, response: Response) -> dict[str, Any]:
+    username = (request.username or "").strip()
+    if not username or not auth.authenticate(username, request.password or ""):
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    token = await auth.create_session(store.get_redis(), username)
+    response.set_cookie(value=token, **auth.cookie_kwargs())
+    log.info("login: %s", username)
+    return {"username": username}
+
+
+@app.post("/api/logout")
+async def logout(request: Request, response: Response) -> dict[str, Any]:
+    token = request.cookies.get(auth.COOKIE_NAME)
+    await auth.destroy_session(store.get_redis(), token)
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/me")
+async def me(request: Request) -> dict[str, Any]:
+    return {"username": await _current_user(request)}
 
 
 @app.get("/")
@@ -429,7 +564,7 @@ async def session() -> dict[str, Any]:
     connector = cronos.get_connector()
     return {
         "ready": _api_key_configured(),
-        "modes": MODES,
+        "modes": _visible_modes(),
         "credits": await _credits(),
         "max_file_mb": MAX_BYTES // (1024 * 1024),
         "mapping": {
@@ -448,11 +583,14 @@ async def credits(refresh: bool = False) -> dict[str, Any]:
 
 @app.post("/api/documents")
 async def create_extraction(
+    request: Request,
     file: UploadFile = File(...),
     mode: str = Form(DEFAULT_MODE),
 ) -> dict[str, Any]:
+    username = await _current_user(request)
     mode = (mode or DEFAULT_MODE).strip().lower()
-    if mode not in MODE_IDS:
+    visible = {m["id"] for m in _visible_modes()}
+    if mode not in MODE_IDS or mode not in visible:
         raise HTTPException(status_code=400, detail="Please choose an extraction mode.")
     tier = TIER_FOR_MODE[mode]
 
@@ -482,8 +620,15 @@ async def create_extraction(
         raise _friendly(exc, "We couldn't start the extraction. Please try again.") from exc
 
     pages = _count_pages(contents)
-    _jobs[job.id] = {"job_id": job.id, "filename": filename, "mode": mode,
-                     "tier": tier, "pages": pages}
+    meta = {
+        "job_id": job.id,
+        "filename": filename,
+        "mode": mode,
+        "tier": tier,
+        "pages": pages,
+        "owner": username,
+    }
+    await store.put_job(job.id, meta)
     return {
         "job_id": job.id,
         "filename": filename,
@@ -494,10 +639,9 @@ async def create_extraction(
 
 
 @app.get("/api/documents/{job_id}")
-async def extraction_status(job_id: str) -> dict[str, Any]:
-    meta = _jobs.setdefault(
-        job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None}
-    )
+async def extraction_status(job_id: str, request: Request) -> dict[str, Any]:
+    username = await _current_user(request)
+    meta = await _owned_job(job_id, username)
     tier = meta.get("tier") or TIER_FOR_MODE[DEFAULT_MODE]
     client = get_client()
 
@@ -549,7 +693,6 @@ async def export_word(payload: WordExport) -> Response:
     )
 
 
-
 # ----------------------------------------------------------------- field mapping
 
 
@@ -560,20 +703,6 @@ def _document_meta(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
         "page_count": meta.get("pages"),
         "mode": meta.get("mode"),
     }
-
-
-def _job_meta(job_id: str) -> dict[str, Any]:
-    return _jobs.setdefault(
-        job_id, {"job_id": job_id, "mode": DEFAULT_MODE, "filename": None}
-    )
-
-
-def _parse_lock(meta: dict[str, Any]) -> asyncio.Lock:
-    """One fetch per job even when the header and the layout are wanted at once."""
-    lock = meta.get("lock")
-    if lock is None:
-        lock = meta["lock"] = asyncio.Lock()
-    return lock
 
 
 async def _fetch(job_id: str, meta: dict[str, Any], with_items: bool) -> Any:
@@ -599,42 +728,40 @@ async def _fetch(job_id: str, meta: dict[str, Any], with_items: bool) -> Any:
     return result
 
 
-async def _parse_artifacts(job_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Text and page layout for a finished job, fetched once and kept.
+async def _parse_artifacts(job_id: str, username: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Text and page layout for a finished job, fetched once and kept in Redis."""
+    meta = await _owned_job(job_id, username)
+    cached = await store.get_parse(job_id)
+    if cached:
+        return meta, cached
 
-    This is the only place the layout items are pulled, because they dwarf the
-    text — roughly a third of a second per page — and are needed only to draw
-    values back onto the original.
-    """
-    meta = _job_meta(job_id)
-    async with _parse_lock(meta):
-        if meta.get("parse"):
-            return meta, meta["parse"]
+    async with store.lock(f"parse:{job_id}"):
+        cached = await store.get_parse(job_id)
+        if cached:
+            return meta, cached
 
         result = await _fetch(job_id, meta, with_items=True)
         started = time.monotonic()
         payload = _serialize(result, meta)
-        meta["parse"] = {
+        parse = {
             "markdown": payload["markdown"],
             "pages": payload["pages"],
-            "items": _layout_pages(result),
+            "items": _layout_pages(result, job_id),
         }
+        await store.put_parse(job_id, parse)
         log.info(
             "cached parse for %s: %s page(s), %s layout page(s), prepared in %.1fs",
-            job_id, len(meta["parse"]["pages"]), len(meta["parse"]["items"]),
+            job_id, len(parse["pages"]), len(parse["items"]),
             time.monotonic() - started,
         )
-        return meta, meta["parse"]
+        return meta, parse
 
 
 async def _header_pages(job_id: str, meta: dict[str, Any]) -> list[dict[str, Any]]:
-    """The first few pages of text — all the header block can be on.
-
-    Fetched without the layout items so it comes back in about a second, which
-    lets the header be read while the layout is still downloading.
-    """
-    if meta.get("parse"):
-        return (meta["parse"].get("pages") or [])[:HEADER_PAGE_LIMIT]
+    """The first few pages of text — all the header block can be on."""
+    cached = await store.get_parse(job_id)
+    if cached:
+        return (cached.get("pages") or [])[:HEADER_PAGE_LIMIT]
 
     result = await _fetch(job_id, meta, with_items=False)
     pages = _pages_from(getattr(result, "markdown", None), "markdown") \
@@ -662,70 +789,61 @@ def _header_response(job_id: str, meta: dict[str, Any], header: dict[str, Any],
     }
 
 
-async def _read_header(job_id: str) -> dict[str, Any]:
+async def _read_header(job_id: str, username: str) -> dict[str, Any]:
     """Step one: what we believe the document's header block says."""
-    meta = _job_meta(job_id)
     started = time.monotonic()
 
-    if "header_rows" in meta and meta.get("parse"):
-        parse = meta["parse"]
-        pages = (parse.get("pages") or [])[:HEADER_PAGE_LIMIT]
-        document = fields.document_for_model(pages, "")
-        header = mapping.build_header(
-            meta["header_rows"], anchors.PageIndex(parse.get("items") or [])
-        )
-        log.info("header cache hit for %s", job_id)
-        return _header_response(
-            job_id, meta, header, parse, document, pages, meta.get("header_usage") or {}
-        )
+    async with store.lock(f"header:{job_id}"):
+        meta = await _owned_job(job_id, username)
+        parse = await store.get_parse(job_id)
+        if "header_rows" in meta and parse:
+            pages = (parse.get("pages") or [])[:HEADER_PAGE_LIMIT]
+            document = fields.document_for_model(pages, "")
+            header = mapping.build_header(
+                meta["header_rows"], anchors.PageIndex(parse.get("items") or [])
+            )
+            log.info("header cache hit for %s", job_id)
+            return _header_response(
+                job_id, meta, header, parse, document, pages, meta.get("header_usage") or {}
+            )
 
-    # The layout download is the slow half and the model call does not need it,
-    # so the two run together rather than one after the other.
-    layout = asyncio.create_task(_parse_artifacts(job_id))
-    try:
-        pages = await _header_pages(job_id, meta)
-        document = fields.document_for_model(pages, "")
-        log.info("header prompt for %s: %s page(s), %s chars",
-                 job_id, len(pages), len(document))
-
-        read_started = time.monotonic()
+        layout = asyncio.create_task(_parse_artifacts(job_id, username))
         try:
-            result = await fields.extract_header(document)
-        except fields.ExtractionUnavailable as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        log.info("header read for %s in %.1fs", job_id, time.monotonic() - read_started)
+            pages = await _header_pages(job_id, meta)
+            document = fields.document_for_model(pages, "")
+            log.info("header prompt for %s: %s page(s), %s chars",
+                     job_id, len(pages), len(document))
 
-        meta, parse = await layout
-    except BaseException:
-        layout.cancel()
-        raise
+            read_started = time.monotonic()
+            try:
+                async with _read_sem:
+                    result = await fields.extract_header(document)
+            except fields.ExtractionUnavailable as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            log.info("header read for %s in %.1fs", job_id, time.monotonic() - read_started)
 
-    header = mapping.build_header(
-        result["values"], anchors.PageIndex(parse.get("items") or [])
-    )
-    meta["header_rows"] = result["values"]
-    meta["header_usage"] = result.get("usage", {})
-    log.info("header stage for %s took %.1fs", job_id, time.monotonic() - started)
+            meta, parse = await layout
+        except BaseException:
+            layout.cancel()
+            raise
 
-    return _header_response(
-        job_id, meta, header, parse, document, pages, result.get("usage", {})
-    )
+        header = mapping.build_header(
+            result["values"], anchors.PageIndex(parse.get("items") or [])
+        )
+        meta["header_rows"] = result["values"]
+        meta["header_usage"] = result.get("usage", {})
+        await store.put_job(job_id, meta)
+        log.info("header stage for %s took %.1fs", job_id, time.monotonic() - started)
+
+        return _header_response(
+            job_id, meta, header, parse, document, pages, result.get("usage", {})
+        )
 
 
 @app.post("/api/documents/{job_id}/header")
-async def read_header(job_id: str) -> dict[str, Any]:
-    """Join an in-flight read so a refresh does not stack another OpenAI wait."""
-    existing = _header_inflight.get(job_id)
-    if existing is not None and not existing.done():
-        log.info("joining in-flight header read for %s", job_id)
-        return await asyncio.shield(existing)
-    task = asyncio.create_task(_read_header(job_id))
-    _header_inflight[job_id] = task
-    try:
-        return await asyncio.shield(task)
-    finally:
-        if _header_inflight.get(job_id) is task:
-            _header_inflight.pop(job_id, None)
+async def read_header(job_id: str, request: Request) -> dict[str, Any]:
+    username = await _current_user(request)
+    return await _read_header(job_id, username)
 
 
 @app.get("/api/cronos/forms")
@@ -775,9 +893,10 @@ def _apply_header_edits(header: dict[str, Any], confirmed: dict[str, Any]) -> No
 
 
 @app.post("/api/documents/{job_id}/map")
-async def map_to_form(job_id: str, request: MapRequest) -> dict[str, Any]:
+async def map_to_form(job_id: str, request: MapRequest, http_request: Request) -> dict[str, Any]:
     """Step two: read the document against the chosen Cronos form."""
-    meta, parse = await _parse_artifacts(job_id)
+    username = await _current_user(http_request)
+    meta, parse = await _parse_artifacts(job_id, username)
 
     try:
         form = await cronos.get_connector().get_form(request.form_id)
@@ -799,7 +918,8 @@ async def map_to_form(job_id: str, request: MapRequest) -> dict[str, Any]:
 
     started = time.monotonic()
     try:
-        result = await fields.extract_form(document, form, confirmed)
+        async with _read_sem:
+            result = await fields.extract_form(document, form, confirmed)
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     log.info("form read for %s in %.1fs (%s value(s), %s repaired, %s dropped)",
@@ -847,9 +967,10 @@ def _visit_view(definition: dict[str, Any]) -> dict[str, Any]:
 
 
 @app.post("/api/documents/{job_id}/visit")
-async def load_visit(job_id: str, request: VisitRequest) -> dict[str, Any]:
+async def load_visit(job_id: str, request: VisitRequest, http_request: Request) -> dict[str, Any]:
     """Step two: the CRFs the EDC holds for the confirmed visit."""
-    meta = _job_meta(job_id)
+    username = await _current_user(http_request)
+    meta = await _owned_job(job_id, username)
     try:
         visit = await edc.get_visit(request.protocol_no, request.screening_no,
                                     request.visit_name)
@@ -858,6 +979,7 @@ async def load_visit(job_id: str, request: VisitRequest) -> dict[str, Any]:
 
     definition = visit_forms.build_definition(visit, cronos.local_forms())
     meta["visit_definition"] = definition
+    await store.put_job(job_id, meta)
     log.info("visit %s/%s/%s: %s CRF(s)", request.protocol_no, request.screening_no,
              request.visit_name, len(definition["sections"]))
     return {"document": _document_meta(job_id, meta), "form": _visit_view(definition),
@@ -869,9 +991,11 @@ class VisitMapRequest(BaseModel):
 
 
 @app.post("/api/documents/{job_id}/visit/map")
-async def map_to_visit(job_id: str, request: VisitMapRequest) -> dict[str, Any]:
+async def map_to_visit(job_id: str, request: VisitMapRequest,
+                       http_request: Request) -> dict[str, Any]:
     """Step three: read the document against the CRFs the EDC returned."""
-    meta, parse = await _parse_artifacts(job_id)
+    username = await _current_user(http_request)
+    meta, parse = await _parse_artifacts(job_id, username)
     definition = meta.get("visit_definition")
     if not definition:
         raise HTTPException(
@@ -888,7 +1012,8 @@ async def map_to_visit(job_id: str, request: VisitMapRequest) -> dict[str, Any]:
 
     started = time.monotonic()
     try:
-        result = await fields.extract_form(document, definition, confirmed)
+        async with _read_sem:
+            result = await fields.extract_form(document, definition, confirmed)
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     log.info("visit read for %s in %.1fs (%s value(s))", job_id,
@@ -914,17 +1039,59 @@ class VisitSaveRequest(BaseModel):
     dry_run: bool = False
 
 
-@app.post("/api/documents/{job_id}/visit/save")
-async def save_visit(job_id: str, request: VisitSaveRequest) -> dict[str, Any]:
-    """Step four: send the reviewed values, and their source crops, to the EDC."""
-    meta = _job_meta(job_id)
+def _visit_triple_from_payload(payload: dict[str, Any]) -> Optional[tuple[str, str, str]]:
+    form = payload.get("form") or {}
+    edc_meta = form.get("edc") or {}
+    protocol = edc_meta.get("protocolNo") or (payload.get("header") or {}).get("protocol_no")
+    screening = edc_meta.get("screeningNo") or (payload.get("header") or {}).get("subject_no")
+    visit = edc_meta.get("visitName") or form.get("visit") or (payload.get("header") or {}).get("visit_name")
+    # Header values may be nested in groups after revalidate.
+    if not all([protocol, screening, visit]):
+        header_vals = {
+            field["field_id"]: field.get("value")
+            for group in (payload.get("header") or {}).get("groups") or []
+            for field in group.get("fields") or []
+        }
+        protocol = protocol or header_vals.get("protocol_no")
+        screening = screening or header_vals.get("subject_no")
+        visit = visit or header_vals.get("visit_name")
+    if protocol and screening and visit:
+        return str(protocol), str(screening), str(visit)
+    return None
+
+
+async def _ensure_visit_definition(meta: dict[str, Any], job_id: str,
+                                   payload: dict[str, Any]) -> dict[str, Any]:
     definition = meta.get("visit_definition")
-    if not definition:
+    if definition:
+        return definition
+    triple = _visit_triple_from_payload(payload)
+    if not triple:
         raise HTTPException(
             status_code=409, detail="Load the visit from the EDC before saving."
         )
+    protocol, screening, visit_name = triple
+    try:
+        visit = await edc.get_visit(protocol, screening, visit_name)
+    except edc.EdcUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    definition = visit_forms.build_definition(visit, cronos.local_forms())
+    meta["visit_definition"] = definition
+    await store.put_job(job_id, meta)
+    log.info("visit definition rebuilt for %s from %s/%s/%s",
+             job_id, protocol, screening, visit_name)
+    return definition
 
+
+@app.post("/api/documents/{job_id}/visit/save")
+async def save_visit(job_id: str, request: VisitSaveRequest,
+                     http_request: Request) -> dict[str, Any]:
+    """Step four: send the reviewed values, and their source crops, to the EDC."""
+    username = await _current_user(http_request)
+    meta = await _owned_job(job_id, username)
     reviewed = mapping.revalidate(request.payload)
+    definition = await _ensure_visit_definition(meta, job_id, reviewed)
+
     body, warnings = visit_forms.build_save(definition, reviewed.get("form") or {},
                                             request.crops)
 
@@ -937,8 +1104,8 @@ async def save_visit(job_id: str, request: VisitSaveRequest) -> dict[str, Any]:
         "values": sum(1 for c in body["crfs"] for f in c["fields"] if f["value"]),
         "images": sum(len(c["images"]) for c in body["crfs"]),
     }
-    log.info("visit save for %s: %s crop(s) received, %s image(s) attached, %s value(s)",
-             job_id, len(request.crops), counts["images"], counts["values"])
+    log.info("visit save for %s by %s: %s crop(s) received, %s image(s) attached, %s value(s)",
+             job_id, username, len(request.crops), counts["images"], counts["values"])
     if request.crops and not counts["images"]:
         log.warning("visit save for %s: crop keys did not match any field: %s",
                     job_id, list(request.crops)[:20])
@@ -951,8 +1118,23 @@ async def save_visit(job_id: str, request: VisitSaveRequest) -> dict[str, Any]:
         result = await edc.save_visit(body)
     except edc.EdcUnavailable as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    log.info("visit save for %s: %s value(s), %s image(s)", job_id,
-             counts["values"], counts["images"])
+
+    audit = {
+        "at": time.time(),
+        "username": username,
+        "job_id": job_id,
+        "protocolNo": body.get("protocolNo"),
+        "screeningNo": body.get("screeningNo"),
+        "visitName": body.get("visitName"),
+        "counts": counts,
+    }
+    log.info("visit save for %s by %s: %s/%s/%s — %s value(s), %s image(s)",
+             job_id, username, body.get("protocolNo"), body.get("screeningNo"),
+             body.get("visitName"), counts["values"], counts["images"])
+    try:
+        await store.audit_save(audit)
+    except Exception as exc:
+        log.warning("audit log write failed: %s", exc)
     return {"sent": True, "counts": counts, "warnings": warnings, "result": result}
 
 
@@ -964,12 +1146,11 @@ class LocateRequest(BaseModel):
 
 
 @app.post("/api/documents/{job_id}/locate")
-async def locate_fields(job_id: str, request: LocateRequest) -> dict[str, Any]:
+async def locate_fields(job_id: str, request: LocateRequest,
+                        http_request: Request) -> dict[str, Any]:
     """Place values on the page (OpenAI vision or Tesseract)."""
+    await _owned_job(job_id, await _current_user(http_request))
     if not vision.configured():
-        # Say what would fix it. On Windows this is the whole reason the page
-        # shows no boxes, and "contact your administrator" sent people looking
-        # in the wrong place.
         raise HTTPException(
             status_code=503,
             detail=(
@@ -979,17 +1160,16 @@ async def locate_fields(job_id: str, request: LocateRequest) -> dict[str, Any]:
             ),
         )
     started = time.monotonic()
-    # Keep the exact request when asked, so a placement can be replayed and
-    # its raw model boxes inspected without another trip through the browser.
-    dump = (os.getenv("DEBUG_LAYOUT_DIR") or "").strip()
+    dump = _debug_layout_dir()
     if dump:
         try:
             Path(dump).mkdir(parents=True, exist_ok=True)
-            (Path(dump) / "locate_pages.json").write_text(json.dumps(request.pages))
-            (Path(dump) / "locate_targets.json").write_text(json.dumps(request.targets))
+            (Path(dump) / f"locate_pages-{job_id}.json").write_text(json.dumps(request.pages))
+            (Path(dump) / f"locate_targets-{job_id}.json").write_text(json.dumps(request.targets))
         except Exception as exc:
             log.warning("could not dump locate request: %s", exc)
-    found = await vision.locate(request.pages, request.targets)
+    async with _read_sem:
+        found = await vision.locate(request.pages, request.targets)
     log.info("%s locate for %s: %s/%s in %.1fs", vision.model_name(), job_id,
              len(found), len(request.targets), time.monotonic() - started)
     return {"model": vision.model_name(), "located": found,
@@ -1008,9 +1188,8 @@ def _export_stem(name: str, payload: dict[str, Any]) -> str:
         for field in group.get("fields") or []
     }
     parts = [header.get("protocol_no"), header.get("subject_no"), header.get("visit_name")]
-    stem = " ".join(str(part) for part in parts if part) or Path(name or "crf").stem
-    stem = re.sub(r"[\\/:*?\"<>|]+", "", stem).strip()
-    return stem or "case-report-form"
+    stem = "-".join(str(p) for p in parts if p) or Path(name or "case-report-form").stem
+    return re.sub(r"[\\/:*?\"<>|]+", "", stem).strip() or "case-report-form"
 
 
 @app.post("/api/exports/crf-pdf")
@@ -1018,7 +1197,7 @@ async def export_crf_pdf(request: CrfExport) -> Response:
     payload = mapping.revalidate(request.payload)
     stem = _export_stem(request.filename, payload)
     try:
-        data = build_crf_pdf(payload)
+        data = build_crf_pdf(payload, stem)
     except Exception as exc:
         log.exception("crf pdf export failed", exc_info=exc)
         raise HTTPException(status_code=500, detail="We couldn't build the PDF.") from exc
@@ -1110,10 +1289,14 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT"))
+    production = auth.is_production() or bool(os.getenv("RAILWAY_ENVIRONMENT"))
+    workers = max(1, int(os.getenv("WEB_CONCURRENCY") or (2 if production else 1)))
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
         port=port,
-        reload=not on_railway,
+        reload=not production and workers == 1,
+        workers=workers if not (not production and workers == 1) else None,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )

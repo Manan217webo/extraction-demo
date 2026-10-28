@@ -1,0 +1,7 @@
+# Automatic HTTPS for a customer domain.
+# Set SITE_ADDRESS in the environment or edit the hostname below, then:
+#   docker compose --profile tls up -d
+
+{$SITE_ADDRESS:localhost} {
+	reverse_proxy app:8000
+}

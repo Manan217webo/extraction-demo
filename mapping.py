@@ -355,7 +355,7 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
             "groups": built_groups,
         })
 
-    return {
+    built = {
         "form_id": form.get("form_id"),
         "form_name": form.get("form_name"),
         "form_version": form.get("form_version"),
@@ -363,6 +363,15 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
         "visit": form.get("visit"),
         "sections": sections,
     }
+    # Keep the EDC visit triple on the client payload so a save after a Redis
+    # miss can re-load the visit without asking the reviewer again.
+    if form.get("edc"):
+        built["edc"] = {
+            "protocolNo": form["edc"].get("protocolNo"),
+            "screeningNo": form["edc"].get("screeningNo"),
+            "visitName": form["edc"].get("visitName"),
+        }
+    return built
 
 
 # --------------------------------------------------------------------------- views

@@ -22,6 +22,15 @@
       </div>
 
       <div class="topbar-right">
+        <div class="menu-wrap" id="recent-wrap">
+          <button type="button" class="btn btn-quiet hidden" id="recent-btn" aria-haspopup="true" aria-expanded="false">
+            Recent reviews
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <div class="menu recent-menu hidden" id="recent-menu" role="menu"></div>
+        </div>
         <div id="credits-chip" class="credits-chip is-loading" tabindex="0">
           <svg class="credit-ring" viewBox="0 0 36 36" aria-hidden="true">
             <circle class="ring-track" cx="18" cy="18" r="15.5" />
@@ -38,8 +47,34 @@
             <div class="pop-foot" id="pop-renews"></div>
           </div>
         </div>
+        <div id="user-chip" class="user-chip hidden">
+          <span id="user-name"></span>
+          <button type="button" id="logout-btn" class="link-btn">Log out</button>
+        </div>
       </div>
     </header>
+
+    <div id="login-overlay" class="login-overlay" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <form id="login-form" class="login-card" autocomplete="on">
+        <img src="/static/brand/whpl-logo.png" alt="Webo Healthtech" class="login-logo" />
+        <h1 id="login-title">Sign in</h1>
+        <p class="login-lede">Reviewers sign in before uploading a CRF.</p>
+        <label class="login-field">
+          <span>Username</span>
+          <input id="login-username" name="username" type="text" autocomplete="username" required />
+        </label>
+        <label class="login-field">
+          <span>Password</span>
+          <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <p id="login-error" class="login-error hidden" role="alert"></p>
+        <button type="submit" class="btn btn-primary btn-lg" id="login-submit">Sign in</button>
+      </form>
+    </div>
+
+    <div id="tab-banner" class="tab-banner hidden" role="status">
+      This review is open in another tab. Editing is paused here so the two tabs do not overwrite each other.
+    </div>
 
     <main class="workspace" id="workspace">
       <section class="intro">

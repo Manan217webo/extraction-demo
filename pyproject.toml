@@ -17,6 +17,7 @@ dependencies = [
     "reportlab>=4.2",
     "pillow>=10.0",
     "pytesseract>=0.3.10",
+    "redis>=5",
 ]
 
 [tool.uv]
