@@ -23,6 +23,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import boxes
 import fields
 import mapping
 
@@ -75,7 +76,6 @@ class Span:
         }
 
 
-GRID = 1000.0
 # The model's time grows with the number of targets in one request: seven
 # targets placed in ~10s, forty in ~30s. A page's targets are split into
 # batches of this size and the batches run concurrently, so a dense page
@@ -130,16 +130,7 @@ OPENAI_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "found": {"type": "boolean"},
-                    "x0": {"type": "integer"},
-                    "y0": {"type": "integer"},
-                    "x1": {"type": "integer"},
-                    "y1": {"type": "integer"},
-                    "label_found": {"type": "boolean"},
-                    "lx0": {"type": "integer"},
-                    "ly0": {"type": "integer"},
-                    "lx1": {"type": "integer"},
-                    "ly1": {"type": "integer"},
+                    **boxes.PROPERTIES,
                 },
                 "required": ["id", "found", "x0", "y0", "x1", "y1",
                              "label_found", "lx0", "ly0", "lx1", "ly1"],
@@ -540,26 +531,6 @@ def _page(image_url: str, targets: list[dict[str, Any]]) -> dict[str, dict[str, 
     return found
 
 
-def _sane_grid(box: dict[str, Any]) -> Optional[dict[str, float]]:
-    """OpenAI's 0..1000 corners as 0..1 fractions, or None if unbelievable."""
-    try:
-        x0, y0 = float(box["x0"]) / GRID, float(box["y0"]) / GRID
-        x1, y1 = float(box["x1"]) / GRID, float(box["y1"]) / GRID
-    except (KeyError, TypeError, ValueError):
-        return None
-    x0, x1 = min(x0, x1), max(x0, x1)
-    y0, y1 = min(y0, y1), max(y0, y1)
-    if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
-        return None
-    width, height = x1 - x0, y1 - y0
-    if width < MIN_SIDE or height < MIN_SIDE:
-        return None
-    if width * height > MAX_AREA:
-        return None
-    return {"x": round(x0, 5), "y": round(y0, 5),
-            "w": round(width, 5), "h": round(height, 5)}
-
-
 async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
     # The sheet stacks several CRFs and they repeat each other's questions: two
     # blocks ask whether an assessment was performed and two carry a date in the
@@ -595,38 +566,9 @@ async def _openai_page(image: str, targets: list[dict[str, Any]]) -> dict[str, d
 
     out: dict[str, dict[str, float]] = {}
     for box in data.get("boxes") or []:
-        if not box.get("found"):
-            continue
-        # The label and the value are asked for separately and joined here, so a
-        # row-spanning box is arithmetic rather than something the model has to
-        # get right in one go. The label is only allowed to widen the box along
-        # the row: a label found on another line would drag the box across half
-        # the page, which is worse than the value alone.
-        merged = dict(box)
-        if box.get("label_found"):
-            joined = {**box, "x0": min(box["x0"], box["lx0"]),
-                      "y0": min(box["y0"], box["ly0"]),
-                      "x1": max(box["x1"], box["lx1"]),
-                      "y1": max(box["y1"], box["ly1"])}
-            # A label belongs to the value's row when their vertical spans
-            # overlap. Judging by the union's height rejected every label on
-            # the real form: "Seated Systolic Blood Pressure" wraps to two
-            # lines, so its box is twice the value's height and the union
-            # failed a height cap meant to catch a label from another row.
-            # Overlap is what actually separates the two cases.
-            value_h = max(box["y1"] - box["y0"], 1)
-            overlap = min(box["y1"], box["ly1"]) - max(box["y0"], box["ly0"])
-            if overlap >= 0.4 * value_h:
-                merged = joined
-            else:
-                log.info("openai label for %s ignored, not on the value's row "
-                         "(value y %s-%s, label y %s-%s)", box.get("id"),
-                         box["y0"], box["y1"], box["ly0"], box["ly1"])
-        rect = _sane_grid(merged)
-        if rect is None:
-            log.info("openai box for %s rejected: %s", box.get("id"), box)
-            continue
-        out[str(box.get("id"))] = rect
+        rect = boxes.rect(box, box.get("id"))
+        if rect is not None:
+            out[str(box.get("id"))] = rect
     return out
 
 

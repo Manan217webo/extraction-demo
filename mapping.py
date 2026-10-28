@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 import anchors
+import checks
 import cronos
 
 LOW_CONFIDENCE = 0.6
@@ -186,6 +187,8 @@ def _reading(row: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         reading["agreed"] = bool(row.get("agreed"))
         if not row.get("agreed"):
             reading["second_value"] = row.get("second_value")
+        if row.get("one_read"):
+            reading["one_read"] = True
     return reading or None
 
 
@@ -195,7 +198,9 @@ def _reading_issues(reading: Optional[dict[str, Any]]) -> list[str]:
     issues = []
     if reading.get("corrected"):
         issues.append("corrected_on_page")
-    if reading.get("reads", 1) > 1 and not reading.get("agreed"):
+    if reading.get("one_read"):
+        issues.append("one_read_only")
+    elif reading.get("reads", 1) > 1 and not reading.get("agreed"):
         issues.append("reads_disagree")
     return issues
 
@@ -227,6 +232,10 @@ def _build_field(field: dict[str, Any], row: Optional[dict[str, Any]],
                 match="exact" if found["exact"] else "partial",
                 matched_text=found["matched_text"],
             )
+    if (row and value is not None and not source["anchored"]
+            and row.get("rect") and row.get("page")):
+        # The read looked at the page and said where the value is.
+        source.update(anchored=True, page=row["page"], rects=[row["rect"]], match="read")
     if value is not None and not source["anchored"]:
         issues.append("not_located_on_page")
         # The parser could not place it, but we do know which block it belongs
@@ -576,6 +585,7 @@ def revalidate(payload: dict[str, Any]) -> dict[str, Any]:
                 issues.append("required_field_empty")
             field["issues"] = issues
 
+    checks.apply(payload)
     payload["highlights"] = highlights(payload.get("header") or {}, payload.get("form") or {})
     payload["summary"] = summarise(
         (payload.get("header") or {}).get("groups") or [], payload.get("form") or {}

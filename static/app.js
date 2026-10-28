@@ -703,9 +703,28 @@ const ISSUE_TEXT = {
   required_field_empty: "required, but empty",
   corrected_on_page: "corrected on the page",
   reads_disagree: "two reads disagree",
+  one_read_only: "only one read saw a value",
+  implausible_value: "not a believable reading",
+  unit_mismatch: "doesn't fit the unit ticked",
+  systolic_not_above_diastolic: "systolic isn't above diastolic",
+  contradicts_section: "answered No, but results are recorded",
+  nothing_recorded: "answered Yes, but nothing is recorded",
+  missing_when_abnormal: "needed when the row is Abnormal",
+  answered_when_normal: "answered, but the row is Normal",
+  date_in_future: "date is in the future",
+  date_too_old: "date is implausibly old",
 };
 // Raised by how the value was read rather than by what it is.
-const READING_ISSUES = new Set(["low_confidence", "corrected_on_page", "reads_disagree"]);
+const READING_ISSUES = new Set([
+  "low_confidence", "corrected_on_page", "reads_disagree", "one_read_only",
+]);
+// Common-sense checks on what was read. They stay after an edit until the
+// server revalidates the new value.
+const CHECK_ISSUES = new Set([
+  "implausible_value", "unit_mismatch", "systolic_not_above_diastolic",
+  "contradicts_section", "nothing_recorded", "missing_when_abnormal",
+  "answered_when_normal", "date_in_future", "date_too_old",
+]);
 
 /* Values in a section a reviewer should look at before saving. */
 function toCheck(section) {
@@ -713,11 +732,13 @@ function toCheck(section) {
   (section.groups || []).forEach((group) =>
     (group.instances || []).forEach((instance) => all.push(...(instance.fields || [])))
   );
-  return all.filter((field) => (field.issues || []).some((code) => READING_ISSUES.has(code)))
-    .length;
+  return all.filter((field) => (field.issues || [])
+    .some((code) => READING_ISSUES.has(code) || CHECK_ISSUES.has(code))).length;
 }
 
 const HARD_ISSUES = new Set([
+  "implausible_value", "unit_mismatch", "systolic_not_above_diastolic",
+  "contradicts_section", "date_in_future",
   "not_a_number", "not_an_allowed_option", "required_field_empty",
   "below_expected_range", "above_expected_range",
 ]);
@@ -1097,7 +1118,7 @@ async function restoreSession(jobId) {
     els.formBody.classList.remove("hidden");
     if (state.edcSaved) markSavedToEdc();
     const located = collectHighlights(state.payload.form)
-      .some((item) => item.match === "located");
+      .some((item) => PLACED_ON_PAGE.has(item.match));
     if (!located) {
       flowStart("Placing boxes on the page…");
       refineBoxes(prefetchPageImages());
@@ -1569,7 +1590,7 @@ function renderField(field, { compact = false } = {}) {
       }
       meta.appendChild(struck);
     }
-    if (reading.reads > 1 && !reading.agreed) {
+    if (reading.reads > 1 && !reading.agreed && !reading.one_read) {
       const other = document.createElement("span");
       other.className = "second-read";
       other.textContent = `Other read: ${reading.second_value ?? "blank"}`;
@@ -1805,12 +1826,16 @@ function collectHighlightsWithLabels(container) {
   return out;
 }
 
+// Boxes a model placed while looking at the page: by the read itself, or by the
+// separate locator for anything the read left without one.
+const PLACED_ON_PAGE = new Set(["read", "located"]);
+
 function boxesToDraw(container) {
   // Parser/interpolated rectangles cover whole tables and look wrong. Only
-  // vision-located boxes are drawn, so a reviewer never sees the guess.
+  // boxes placed from the page image are drawn, so a reviewer never sees the guess.
   const all = collectHighlightsWithLabels(container);
   return mergeRowBoxes(
-    all.filter((item) => !item.rowLabel && item.match === "located"),
+    all.filter((item) => !item.rowLabel && PLACED_ON_PAGE.has(item.match)),
     all.filter((item) => item.rowLabel)
   );
 }
@@ -2289,6 +2314,9 @@ function locateTargets() {
   return collectHighlights(state.payload.form)
     .filter((item) => item.page && item.value !== null && item.value !== undefined
       && String(item.value) !== "")
+    // The read already placed these while it looked at the page; only the rest
+    // need the separate locator.
+    .filter((item) => item.match !== "read")
     .map((item) => ({
       id: item.key, key: item.key, page: item.page,
       section: item.section || item.group,

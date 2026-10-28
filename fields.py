@@ -22,7 +22,9 @@ from typing import Any, Optional
 
 import httpx
 
+import boxes
 import cronos
+import mapping
 
 log = logging.getLogger("extraction.fields")
 
@@ -47,7 +49,7 @@ TRANSPORT_RETRIES = 1
 # Reasoning models (gpt-5*, o1/o3, terra) reject `temperature`. Remembering a
 # 400 here means the next call — and every locate batch — skips the wasted retry.
 _NO_TEMPERATURE: set[str] = set()
-_NO_TEMPERATURE_MARKERS = ("gpt-5", "o1", "o3", "o4", "terra")
+_NO_TEMPERATURE_MARKERS = ("gpt-5", "gpt-6", "o1", "o3", "o4", "terra", "sol", "luna")
 
 
 class ExtractionUnavailable(RuntimeError):
@@ -143,6 +145,14 @@ VALUE_PROPERTIES = {
         "description": "The value that was struck through, as best you can read it. "
                        "Null when nothing was struck.",
     },
+    "box": {
+        "type": "object",
+        "description": "Where on the page image named in `page` the value sits. "
+                       "Only filled in when page images are given.",
+        "properties": boxes.PROPERTIES,
+        "required": list(boxes.PROPERTIES),
+        "additionalProperties": False,
+    },
 }
 
 HEADER_SCHEMA = {
@@ -174,6 +184,15 @@ FORM_VALUE_PROPERTIES = {
     },
     **VALUE_PROPERTIES,
 }
+
+def _without_box(schema: dict[str, Any]) -> dict[str, Any]:
+    item = schema["properties"]["values"]["items"]
+    properties = {k: v for k, v in item["properties"].items() if k != "box"}
+    return {**schema, "properties": {"values": {
+        **schema["properties"]["values"],
+        "items": {**item, "properties": properties, "required": list(properties)},
+    }}}
+
 
 FORM_SCHEMA = {
     "type": "object",
@@ -239,6 +258,9 @@ Rules:
 - Return at most one entry per field address. Omit fields entirely rather than
   guessing."""
 
+HEADER_SCHEMA_NO_BOX = _without_box(HEADER_SCHEMA)
+FORM_SCHEMA_NO_BOX = _without_box(FORM_SCHEMA)
+
 # Added when the page images travel with the text. The transcription is good at
 # printed labels and loses what a strike-through looks like, so the image wins.
 IMAGE_RULES = """
@@ -250,6 +272,26 @@ Page images:
   image disagree, the image is right.
 - For a tick box read from the image, write in `evidence` what you see in words
   (e.g. "Normal crossed out, Abnormal ticked") instead of quoting the text markers."""
+
+# Asked of the first read only. The second read is there to check the values,
+# and leaving the boxes out of it saves a third of its output.
+BOX_RULES = """
+Boxes:
+- For every value, say where it sits on the image of the page named in `page`,
+  as two rectangles in `box`:
+    x0,y0,x1,y1      the value itself — the handwritten digits, the ticked option
+                     or the characters in the comb boxes, plus any unit printed
+                     right after them ("beats/min", "(mmHg)"). For a correction,
+                     the replacement you reported, not the struck entry.
+    lx0,ly0,lx1,ly1  the printed label the value answers to: the row heading in a
+                     table ("Pulse rate"), or the printed question before it.
+                     label_found false and the four numbers 0 when there is none.
+- Coordinates are integers on a 0 to 1000 grid over that page image, left to right
+  and top to bottom: 0,0 is the top-left corner, 1000,1000 the bottom-right. x1 > x0
+  and y1 > y0. Keep each rectangle tight to its own text.
+- found false, with every number 0, when the value is blank or you cannot point to
+  it. A rectangle in the wrong row puts a value against the wrong parameter, so a
+  false is better than a guess."""
 
 # Data URLs the browser renders with pdf.js. Anything else is not a page image.
 _PAGE_IMAGE = re.compile(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$")
@@ -282,8 +324,15 @@ def _with_images(text: str, images: list[tuple[int, str]]) -> Any:
     return parts
 
 
+def _system(images: Optional[list[tuple[int, str]]], with_boxes: bool) -> str:
+    if not images:
+        return RULES
+    return RULES + IMAGE_RULES + (BOX_RULES if with_boxes else "")
+
+
 def header_prompt(document: str,
-                  images: Optional[list[tuple[int, str]]] = None) -> list[dict[str, Any]]:
+                  images: Optional[list[tuple[int, str]]] = None,
+                  with_boxes: bool = True) -> list[dict[str, Any]]:
     lines = []
     for group in cronos.HEADER_GROUPS:
         lines.append(f"\n{group['name']}:")
@@ -298,7 +347,7 @@ def header_prompt(document: str,
                 bits.append(f" — {field['description']}")
             lines.append("".join(bits))
     return [
-        {"role": "system", "content": RULES + (IMAGE_RULES if images else "")},
+        {"role": "system", "content": _system(images, with_boxes)},
         {
             "role": "user",
             "content": _with_images(
@@ -313,7 +362,8 @@ def header_prompt(document: str,
 
 
 def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any],
-                images: Optional[list[tuple[int, str]]] = None) -> list[dict[str, Any]]:
+                images: Optional[list[tuple[int, str]]] = None,
+                with_boxes: bool = True) -> list[dict[str, Any]]:
     lines = [f"Form: {form.get('form_name')} ({form.get('form_id')}, "
              f"version {form.get('form_version')})",
              f"Description: {form.get('form_description') or '—'}", ""]
@@ -373,7 +423,7 @@ def form_prompt(document: str, form: dict[str, Any], header: dict[str, Any],
     )
 
     return [
-        {"role": "system", "content": RULES + (IMAGE_RULES if images else "")},
+        {"role": "system", "content": _system(images, with_boxes)},
         {
             "role": "user",
             "content": _with_images(
@@ -648,7 +698,14 @@ def _clean(row: dict[str, Any]) -> Optional[dict[str, Any]]:
         "confidence": max(0.0, min(1.0, confidence)),
         "corrected": bool(row.get("corrected")) or struck is not None,
         "struck_value": struck,
+        "rect": boxes.rect(row.get("box"), field_id) if value is not None else None,
     }
+
+
+def _header_tokens(model: str) -> int:
+    """A reasoning model spends part of its budget thinking; the small cap that
+    keeps a chat model from stalling would cut it off mid-answer."""
+    return HEADER_MAX_TOKENS if _uses_temperature(model) else HEADER_MAX_TOKENS * 5
 
 
 async def extract_header(document: str,
@@ -658,13 +715,12 @@ async def extract_header(document: str,
     timeout = max(HEADER_TIMEOUT, 60.0) if images else HEADER_TIMEOUT
     second_model = second_read_model() if images else None
     reads = [_complete(header_prompt(document, images), HEADER_SCHEMA, "crf_header",
-                       timeout=timeout, max_tokens=HEADER_MAX_TOKENS)]
+                       timeout=timeout, max_tokens=_header_tokens(model_name()))]
     if second_model:
-        # A reasoning model spends part of its budget thinking; the small cap
-        # that keeps the first read from stalling would cut it off mid-answer.
-        reads.append(_complete(header_prompt(document, images), HEADER_SCHEMA, "crf_header",
+        reads.append(_complete(header_prompt(document, images, with_boxes=False),
+                               HEADER_SCHEMA_NO_BOX, "crf_header",
                                model=second_model, timeout=timeout,
-                               max_tokens=HEADER_MAX_TOKENS * 5))
+                               max_tokens=_header_tokens(second_model)))
     gathered = await asyncio.gather(*reads, return_exceptions=True)
     if isinstance(gathered[0], BaseException):
         raise gathered[0]
@@ -721,22 +777,24 @@ def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
 async def _extract_sections(document: str, form: dict[str, Any],
                             header: dict[str, Any],
                             images: Optional[list[tuple[int, str]]] = None,
-                            model: Optional[str] = None) -> dict[str, Any]:
+                            model: Optional[str] = None,
+                            with_boxes: bool = True) -> dict[str, Any]:
     """One completion per CRF, in parallel — wall clock is the slowest section.
 
     A visit with two CRFs was a single 70s call. Splitting keeps each prompt to
     one block (which is how the page is printed) so two ~20s calls overlap.
     """
     sections = form.get("sections") or []
+    schema = FORM_SCHEMA if with_boxes else FORM_SCHEMA_NO_BOX
     if len(sections) <= 1:
-        return await _complete(form_prompt(document, form, header, images),
-                               FORM_SCHEMA, "crf_form", model=model)
+        return await _complete(form_prompt(document, form, header, images, with_boxes),
+                               schema, "crf_form", model=model)
 
     async def one(section: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         mini = {**form, "sections": [section]}
-        result = await _complete(form_prompt(document, mini, header, images),
-                                 FORM_SCHEMA, "crf_form", model=model)
+        result = await _complete(form_prompt(document, mini, header, images, with_boxes),
+                                 schema, "crf_form", model=model)
         log.info("section %s (%s) read in %.1fs (%s value(s))",
                  section.get("section_id"), section.get("name"),
                  time.monotonic() - started, len(result.get("values") or []))
@@ -779,6 +837,9 @@ def second_read_model() -> Optional[str]:
 # reviewer has to look — the score says so even if the model was sure.
 DISAGREE_CONFIDENCE = 0.4
 CORRECTED_CONFIDENCE = 0.75
+# A value only one read could see is shown, because a blank hides it from the
+# reviewer entirely, but scored below a plain disagreement.
+ONE_READ_CONFIDENCE = 0.3
 _COMPARABLE = re.compile(r"[^0-9a-z.]+")
 
 
@@ -788,6 +849,10 @@ def _same_value(a: Optional[str], b: Optional[str]) -> bool:
     left, right = _COMPARABLE.sub("", a.lower()), _COMPARABLE.sub("", b.lower())
     if left == right:
         return True
+    # The same date written two ways ("16 Feb 2026", "16/02/2026") is agreement.
+    first, second = mapping.parse_date(a), mapping.parse_date(b)
+    if first and second:
+        return first == second
     try:
         return float(left) == float(right)
     except ValueError:
@@ -821,9 +886,20 @@ def reconcile(first: list[dict[str, Any]],
                 row["confidence"] = round((row["confidence"] + other["confidence"]) / 2, 3)
                 row["corrected"] = row["corrected"] or other["corrected"]
                 row["struck_value"] = row["struck_value"] or other["struck_value"]
+        elif row["value"] is None:
+            # Only the second read saw something here. Show it rather than a
+            # blank, and say so.
+            row.update(agreed=False, one_read=True, second_value=None,
+                       value=other_value, evidence=other["evidence"] or row["evidence"],
+                       page=other["page"] or row["page"], rect=None,
+                       corrected=row["corrected"] or other["corrected"],
+                       struck_value=row["struck_value"] or other["struck_value"],
+                       confidence=min(other["confidence"], ONE_READ_CONFIDENCE))
         else:
             row["agreed"] = False
             row["second_value"] = other_value
+            if other_value is None:
+                row["one_read"] = True
             row["confidence"] = min(row["confidence"], DISAGREE_CONFIDENCE)
         if row["corrected"]:
             row["confidence"] = min(row["confidence"], CORRECTED_CONFIDENCE)
@@ -835,7 +911,8 @@ def reconcile(first: list[dict[str, Any]],
         if row["value"] is None:
             continue
         out.append({**row, "reads": 2, "agreed": False, "second_value": None,
-                    "confidence": min(row["confidence"], DISAGREE_CONFIDENCE)})
+                    "one_read": True, "rect": None,
+                    "confidence": min(row["confidence"], ONE_READ_CONFIDENCE)})
     return out
 
 
@@ -845,7 +922,8 @@ async def extract_form(document: str, form: dict[str, Any], header: dict[str, An
     second_model = second_read_model() if images else None
     reads = [_extract_sections(document, form, header, images)]
     if second_model:
-        reads.append(_extract_sections(document, form, header, images, model=second_model))
+        reads.append(_extract_sections(document, form, header, images, model=second_model,
+                                       with_boxes=False))
     gathered = await asyncio.gather(*reads, return_exceptions=True)
     if isinstance(gathered[0], BaseException):
         raise gathered[0]
