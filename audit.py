@@ -37,7 +37,7 @@ ACTIONS = {
     "auth.login", "auth.login_failed", "auth.logout", "auth.locked", "auth.session_expired",
     "user.created", "user.updated", "user.disabled", "user.password_changed",
     "source.browsed", "file.ingested", "file.duplicate_detected", "file.reprocess_declined",
-    "document.version_added", "document.assigned", "document.viewed",
+    "document.version_added", "document.assigned", "document.viewed", "document.relinked",
     "batch.created", "batch.cancelled",
     "extraction.queued", "extraction.started", "extraction.completed", "extraction.failed",
     "extraction.cancelled", "extraction.retried",
@@ -56,7 +56,6 @@ _HASHED = ("id", "ts", "action", "username", "full_name", "role", "document_id",
            "protocol_no", "screening_no", "visit_name", "field", "old_value", "new_value",
            "reason", "details", "client_ip", "app_version")
 
-_chain_lock = asyncio.Lock()
 
 
 def app_version() -> str:
@@ -107,10 +106,32 @@ def chain_hash(prev_hash: str, row: dict[str, Any]) -> str:
     return hashlib.sha256(message).hexdigest()
 
 
+async def lock_chain(session: AsyncSession) -> None:
+    """Make this transaction the only one extending the chain, until it ends.
+
+    PostgreSQL: a transaction-scoped advisory lock, shared by every worker
+    process and released by COMMIT/ROLLBACK — never by Python code, so it can't
+    be let go while the transaction still has unwritten events. A lock wait
+    longer than AUDIT_LOCK_TIMEOUT fails the request instead of hanging it.
+
+    SQLite (development, one process): an in-process lock held until the
+    session commits, rolls back or closes (see db.py).
+    """
+    if session.info.get("audit_locked"):
+        return
+    if db.is_sqlite():
+        lock = db.sqlite_chain_lock()
+        await lock.acquire()
+        session.info["audit_locked"] = lock
+        return
+    timeout = int(os.getenv("AUDIT_LOCK_TIMEOUT_MS") or 20000)
+    await session.execute(text(f"SET LOCAL lock_timeout = {timeout}"))
+    await session.execute(text("SELECT pg_advisory_xact_lock(7402190)"))
+    session.info["audit_locked"] = True
+
+
 async def _last_hash(session: AsyncSession) -> str:
-    if not db.is_sqlite():
-        # One writer at a time extends the chain, across every worker process.
-        await session.execute(text("SELECT pg_advisory_xact_lock(7402190)"))
+    await lock_chain(session)
     last = (await session.execute(
         select(db.AuditEvent.hash).order_by(db.AuditEvent.seq.desc()).limit(1)
     )).scalar()
@@ -146,15 +167,10 @@ async def record(session: AsyncSession, action: str, *, username: str,
         "reason": reason, "details": {**(details or {}), "hash_version": 1},
         "client_ip": client_ip, "app_version": APP_VERSION,
     }
-    async with _chain_lock:
-        prev = await _last_hash(session)
-        # Pending rows in this same session extend the chain too.
-        pending = [obj for obj in session.new if isinstance(obj, db.AuditEvent)]
-        if pending:
-            prev = pending[-1].hash
-        event = db.AuditEvent(**row, prev_hash=prev, hash=chain_hash(prev, row))
-        session.add(event)
-        await session.flush()
+    prev = await _last_hash(session)
+    event = db.AuditEvent(**row, prev_hash=prev, hash=chain_hash(prev, row))
+    session.add(event)
+    await session.flush()
     session.add(db.AuditOutbox(event_id=event.id, seq=event.seq,
                                status="pending" if delivery_enabled() else "held"))
     return event

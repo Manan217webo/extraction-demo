@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 import audit
 import auth
@@ -35,9 +36,9 @@ router = APIRouter(prefix="/api")
 
 
 def client_ip(request: Request) -> Optional[str]:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """The caller's address as uvicorn resolved it. X-Forwarded-For is honoured
+    only from proxies listed in FORWARDED_ALLOW_IPS, so a client can't put an
+    address of its choosing into the audit trail."""
     return request.client.host if request.client else None
 
 
@@ -242,9 +243,24 @@ async def create_batch(body: BatchRequest, request: Request) -> dict[str, Any]:
     except sources.SourceError as exc:
         raise _source_error(exc) from exc
 
+    # Read and store every file first, outside any transaction: a slow share
+    # must not hold the database (or the audit chain) while it answers.
+    stored: list[tuple[str, tuple[str, str, int]]] = []
+    for item in body.files:
+        try:
+            rel = sources.clean_rel(item.path)
+            data = await conn.read(rel)
+        except sources.SourceError as exc:
+            raise _source_error(exc) from exc
+        sha, path = await blobstore.put(data)
+        stored.append((rel, (sha, path, len(data))))
+        del data
+    reprocess = {sources.clean_rel(f.path): f.reprocess for f in body.files}
+
     async with db.session() as session:
+        await audit.lock_chain(session)  # also serialises batch numbers
         number = int((await session.execute(select(func.max(db.Batch.number)))).scalar() or 0) + 1
-        folders = sorted({f.path.rsplit("/", 1)[0] if "/" in f.path else "" for f in body.files})
+        folders = sorted({rel.rsplit("/", 1)[0] if "/" in rel else "" for rel, _ in stored})
         label = body.label or (f"{conn.name} · {folders[0] or 'top folder'}" if len(folders) == 1
                                else f"{conn.name} · {len(folders)} folders")
         batch = db.Batch(number=number, created_by=user.username, source_id=conn.id,
@@ -254,20 +270,15 @@ async def create_batch(body: BatchRequest, request: Request) -> dict[str, Any]:
         await audit.record(session, "batch.created", username=user.username, client_ip=ip,
                            field=label, reason=reason or None,
                            details={"batch_id": batch.id, "number": number,
-                                    "files": len(body.files)})
+                                    "files": len(stored)})
         queued = skipped = 0
-        for item in body.files:
-            try:
-                rel = sources.clean_rel(item.path)
-                data = await conn.read(rel)
-            except sources.SourceError as exc:
-                raise _source_error(exc) from exc
-            sha = blobstore.sha256_of(data)
+        for rel, blob in stored:
+            sha = blob[0]
             status, prior = await documents.classify(session, conn.id, rel, sha)
             if status == "processing":
                 skipped += 1
                 continue
-            if status == "processed" and not item.reprocess:
+            if status == "processed" and not reprocess.get(rel):
                 skipped += 1
                 await audit.record(session, "file.reprocess_declined", username=user.username,
                                    client_ip=ip, field=rel,
@@ -280,7 +291,7 @@ async def create_batch(body: BatchRequest, request: Request) -> dict[str, Any]:
                                             "decision": "reprocess"})
             ingested = await documents.ingest(
                 session, source_id=conn.id, path=rel, filename=rel.rsplit("/", 1)[-1],
-                data=data, username=user.username, client_ip=ip,
+                stored=blob, username=user.username, client_ip=ip,
                 reason=reason if status in ("changed", "processed") else None)
             await documents.new_extraction(session, ingested.document, username=user.username,
                                            batch_id=batch.id, client_ip=ip,
@@ -376,11 +387,13 @@ async def retry_extraction(extraction_id: str, request: Request) -> dict[str, An
         extraction = await session.get(db.Extraction, extraction_id)
         if extraction is None:
             raise HTTPException(404, "That run could not be found.")
-        if extraction.status not in ("failed", "cancelled", "needs_input"):
+        if extraction.status not in ("failed", "cancelled", "needs_input") \
+                and not (extraction.status == "running" and not documents.is_active(extraction)):
             raise HTTPException(409, "Only a failed or stopped run can be retried.")
         document = await session.get(db.Document, extraction.document_id)
         extraction.status, extraction.stage, extraction.error = "queued", None, None
         extraction.lease_until, extraction.attempts, extraction.finished_at = None, 0, None
+        extraction.claimed_by = None
         document.status = "processing"
         await audit.record(session, "extraction.retried", username=user.username,
                            document=document, client_ip=client_ip(request),
@@ -633,7 +646,8 @@ async def reprocess(document_id: str, body: ReasonRequest, request: Request) -> 
         raise HTTPException(422, "Give a reason for processing this document again.")
     async with db.session() as session:
         document = await _document(session, document_id)
-        if await documents.latest_extraction(session, document.id, documents.ACTIVE_EXTRACTION):
+        if documents.is_active(await documents.latest_extraction(
+                session, document.id, documents.ACTIVE_EXTRACTION)):
             raise HTTPException(409, "This document is already being read.")
         extraction = await documents.new_extraction(session, document, username=user.username,
                                                     reason=reason, client_ip=client_ip(request))
@@ -681,6 +695,11 @@ async def save_draft(document_id: str, body: DraftRequest, request: Request) -> 
                          revision=latest_rev + 1, payload=body.payload, payload_sha256=sha,
                          edits=changes, saved_by=user.username, autosave=body.autosave)
         session.add(draft)
+        try:
+            await session.flush()
+        except IntegrityError as exc:
+            raise HTTPException(409, {"message": "Someone saved a newer draft of this document.",
+                                      "revision": latest_rev + 1}) from exc
         stats = documents.summarise_payload(body.payload)
         document.flags, document.conflicts = stats["flags"], stats["conflicts"]
         document.confidence = stats["confidence"]
@@ -797,7 +816,18 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
         raise HTTPException(409, "The EDC changed since you checked. Review the changes again.")
 
     async with db.session() as session:
-        document = await _document(session, document_id)
+        lock = select(db.Document).where(db.Document.id == document_id)
+        if not db.is_sqlite():
+            lock = lock.with_for_update()  # one submit per document at a time
+        document = (await session.execute(lock)).scalar()
+        if document is None:
+            raise HTTPException(404, "That document could not be found.")
+        in_flight = (await session.execute(
+            select(db.Submission.id).where(
+                db.Submission.document_id == document.id, db.Submission.status == "sending",
+                db.Submission.submitted_at > db.utcnow() - dt.timedelta(minutes=10)))).scalar()
+        if in_flight:
+            raise HTTPException(409, "A submission of this document is already in progress.")
         version = await documents.latest_version(session, document.id)
         before = await esource.base_payload(session, document.id, extraction)
         try:
@@ -835,12 +865,22 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                            details={"signature_id": signature.id,
                                     "record_sha256": signature.record_sha256,
                                     "draft_revision": latest.revision})
+        # Written before the EDC is called: if this process dies mid-call, the
+        # attempt is on record (and reconciled at start-up) rather than lost.
+        pending = db.Submission(document_id=document.id, extraction_id=extraction.id,
+                                draft_revision=latest.revision, signature_id=signature.id,
+                                submitted_by=user.username,
+                                status="sending" if save["crfs"] else "unchanged",
+                                changes=delta["changes"], skipped=len(delta["skipped"]))
+        session.add(pending)
+        await session.flush()
         await audit.record(session, "edc.submit_attempted", username=user.username,
                            document=document, client_ip=ip,
                            details={"changes": len(delta["changes"]),
-                                    "skipped": len(delta["skipped"])})
+                                    "skipped": len(delta["skipped"]),
+                                    "submission_id": pending.id})
         await session.commit()
-        signature_id, draft_rev = signature.id, latest.revision
+        signature_id, draft_rev, submission_id = signature.id, latest.revision, pending.id
 
     counts = {"fields": sum(len(c["fields"]) for c in save["crfs"]),
               "values": len(delta["changes"]), "unchanged": len(delta["skipped"]),
@@ -858,14 +898,10 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
 
     async with db.session() as session:
         document = await _document(session, document_id)
-        submission = db.Submission(document_id=document.id, extraction_id=extraction.id,
-                                   draft_revision=draft_rev, signature_id=signature_id,
-                                   submitted_by=user.username, status=status,
-                                   changes=delta["changes"], skipped=len(delta["skipped"]),
-                                   images=counts["images"], error=error,
-                                   edc_response={"response": response,
-                                                 "verification": verification})
-        session.add(submission)
+        submission = await session.get(db.Submission, submission_id)
+        submission.status, submission.error = status, error
+        submission.images = counts["images"]
+        submission.edc_response = {"response": response, "verification": verification}
         if status != "failed":
             document.status = "submitted"
         action = {"sent": "edc.submitted", "unchanged": "edc.submit_unchanged"}.get(

@@ -15,8 +15,10 @@ nothing was dropped or altered on the way. Each record has its own stable
 
 With no EDC_AUDIT_URL, rows wait as "held" and the audit screen says the trail
 is kept locally only; setting the URL later releases them, oldest first.
-Failures back off exponentially (to an hour) and are retried indefinitely;
-4xx answers other than 408/429 park the batch as "failed" for an admin to retry.
+Delivery is strictly in order: while the oldest record waits (back-off) or is
+parked, nothing newer is sent. Failures back off exponentially (to an hour) and
+are retried indefinitely; 4xx answers other than 408/429 park the batch as
+"failed" until an admin retries it from the audit screen.
 """
 
 from __future__ import annotations
@@ -92,10 +94,18 @@ async def deliver_once() -> int:
         return 0
     now = db.utcnow()
     async with db.session() as session:
+        # Strictly in order: the oldest undelivered record goes first, and while
+        # it is waiting out a back-off (or parked as failed) nothing newer is
+        # sent, so the EDC never sees a gap in the hash chain.
+        head = (await session.execute(
+            select(db.AuditOutbox).where(db.AuditOutbox.status.in_(("pending", "failed")))
+            .order_by(db.AuditOutbox.seq).limit(1))).scalar()
+        if head is None or head.status == "failed" or head.next_attempt_at > now:
+            return 0
         rows = (await session.execute(
             select(db.AuditOutbox, db.AuditEvent)
             .join(db.AuditEvent, db.AuditEvent.id == db.AuditOutbox.event_id)
-            .where(db.AuditOutbox.status == "pending", db.AuditOutbox.next_attempt_at <= now)
+            .where(db.AuditOutbox.status == "pending", db.AuditOutbox.seq >= head.seq)
             .order_by(db.AuditOutbox.seq).limit(BATCH))).all()
     if not rows:
         return 0

@@ -197,8 +197,14 @@ async def authenticate(username: str, password: str, *, client_ip: Optional[str]
                                    client_ip=client_ip)
             await session.commit()
             return user
-        user.failed_logins = (user.failed_logins or 0) + 1
-        details = {"attempt": user.failed_logins, "purpose": purpose}
+        # Atomic, so simultaneous wrong guesses can't slip under the lockout.
+        from sqlalchemy import update
+        attempts = (await session.execute(
+            update(db.User).where(db.User.username == user.username)
+            .values(failed_logins=db.User.failed_logins + 1)
+            .returning(db.User.failed_logins))).scalar()
+        user.failed_logins = attempts
+        details = {"attempt": attempts, "purpose": purpose}
         await audit.record(session, "auth.login_failed" if purpose == "login" else "signature.failed",
                            username=user.username, client_ip=client_ip, details=details)
         if user.failed_logins >= MAX_FAILED:

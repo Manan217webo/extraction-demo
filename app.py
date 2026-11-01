@@ -213,6 +213,11 @@ async def lifespan(_app: FastAPI):
         log.warning("Redis is unreachable at %s — login and job state will fail", store.redis_url())
     await db.init()
     await auth.import_legacy_users()
+    if await esource.reconcile_submissions():
+        log.warning("Some submissions were interrupted mid-send — marked as unknown")
+    if db.is_sqlite() and int(os.getenv("WEB_CONCURRENCY") or 1) > 1:
+        log.warning("SQLite is for one process only; set DATABASE_URL to PostgreSQL "
+                    "before running several workers")
     async with db.session() as session:
         from sqlalchemy import select as _select
         if (await session.execute(_select(db.User).limit(1))).scalar() is None:
@@ -1172,6 +1177,11 @@ async def load_visit(job_id: str, request: VisitRequest, http_request: Request) 
     """Step two: the CRFs the EDC holds for the confirmed visit."""
     username = await _current_user(http_request)
     meta = await _owned_job(job_id, username)
+    problem = await esource.check_relink(job_id, {
+        "protocol_no": request.protocol_no, "screening_no": request.screening_no,
+        "visit_name": cronos.format_visit_name(request.visit_name)})
+    if problem:
+        raise HTTPException(status_code=409, detail=problem)
     try:
         visit = await edc.get_visit(request.protocol_no, request.screening_no,
                                     request.visit_name)

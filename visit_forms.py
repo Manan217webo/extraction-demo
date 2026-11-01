@@ -695,7 +695,8 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
     """The SaveVisitCRFData body for a reviewed form, and anything worth flagging.
 
     Only fields whose reviewed value differs from what the EDC already holds are
-    sent. A value the scan read that the EDC already has is not written again —
+    sent (for a CRF without field ids, the full list in order, so position still
+    identifies each field). A value the scan read that the EDC already has is not written again —
     re-sending it would add a no-op change to the EDC's own audit trail and
     attach a source image to a value nobody changed. A CRF with nothing to change
     is left out entirely, and when no CRF changes the body has no CRFs: the caller
@@ -741,10 +742,16 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                     f"hold ({', '.join(sorted(blocking))}). It was left unchanged in the EDC."
                 )
                 return
-            if field.get("value") is None:
-                return
-            new_value = _as_text(field["value"])
             existing = meta["fields"][index].get("value") or ""
+            if field.get("value") is None:
+                # A blank the AI left is "not read", and leaves the EDC alone. A
+                # value the reviewer deliberately cleared is a change: it is sent
+                # as an empty value so the EDC matches the signed record.
+                if field.get("status") not in ("edited", "manual") or not existing:
+                    return
+                new_value = ""
+            else:
+                new_value = _as_text(field["value"])
             if same_value(new_value, existing):
                 skipped.append({"crfName": meta["crfName"], "label": field.get("label"),
                                 "key": field.get("key") or key, "value": new_value})
@@ -817,6 +824,7 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 "base64Data": crop["base64Data"],
             })
 
+        structured = all(f.get("field_id") is not None for f in meta["fields"])
         if not values:
             # Nothing on this CRF differs from the EDC: send nothing for it, not
             # even the page images.
@@ -837,8 +845,14 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
             # section sequence — is layout, not data, and is not echoed back;
             # nor is the source crop, which travels in `images` alone. A
             # deployment still on bare names gets `fieldName` and `value`.
-            "fields": [_save_field(field, values[field["index"]])
-                       for field in meta["fields"] if field["index"] in values],
+            "fields": ([_save_field(field, values[field["index"]])
+                        for field in meta["fields"] if field["index"] in values]
+                       if structured else
+                       # Without field ids the EDC can only tell same-named fields
+                       # apart by position, so this CRF goes as its full list, the
+                       # untouched fields carrying the values the EDC already has.
+                       [_save_field(field, values.get(field["index"], field.get("value") or ""))
+                        for field in meta["fields"]]),
             "images": images,
         }
         crfs.append(crf)

@@ -31,6 +31,11 @@ import blobstore
 import db
 import documents
 
+
+async def esource_relink(*args, **kwargs):
+    import esource
+    return await esource.relink(*args, **kwargs)
+
 log = logging.getLogger("extraction.pipeline")
 
 LEASE_SECONDS = 300
@@ -55,8 +60,13 @@ class Cancelled(Exception):
 # --------------------------------------------------------------------------- claiming
 
 
-async def _claim() -> Optional[str]:
+class LostLease(Exception):
+    """Another worker has taken this run over; stop without writing anything."""
+
+
+async def _claim() -> Optional[tuple[str, str]]:
     now = db.utcnow()
+    token = f"{WORKER_ID}:{db.new_id()[:8]}"
     async with db.session() as session:
         query = (select(db.Extraction.id)
                  .where(db.Extraction.status.in_(("queued", "running")),
@@ -73,16 +83,19 @@ async def _claim() -> Optional[str]:
             .where(db.Extraction.id == found,
                    or_(db.Extraction.lease_until.is_(None), db.Extraction.lease_until < now))
             .values(lease_until=now + dt.timedelta(seconds=LEASE_SECONDS), status="running",
-                    started_at=now, attempts=db.Extraction.attempts + 1, error=None))
+                    started_at=now, attempts=db.Extraction.attempts + 1, error=None,
+                    claimed_by=token))
         await session.commit()
-        return found if result.rowcount == 1 else None
+        return (found, token) if result.rowcount == 1 else None
 
 
-async def _stage(extraction_id: str, stage: str) -> None:
+async def _stage(extraction_id: str, stage: str, token: str) -> None:
     async with db.session() as session:
         extraction = await session.get(db.Extraction, extraction_id)
         if extraction is None:
             raise Cancelled()
+        if extraction.claimed_by != token:
+            raise LostLease()
         if extraction.batch_id:
             batch = await session.get(db.Batch, extraction.batch_id)
             if batch is not None and batch.cancelled:
@@ -94,17 +107,36 @@ async def _stage(extraction_id: str, stage: str) -> None:
         await session.commit()
 
 
-async def _finish(extraction_id: str, status: str, *, error: Optional[str] = None,
+async def _heartbeat(extraction_id: str, token: str) -> None:
+    """Keep the lease while a long stage (two model reads) runs."""
+    while True:
+        await asyncio.sleep(LEASE_SECONDS / 4)
+        async with db.session() as session:
+            result = await session.execute(
+                update(db.Extraction)
+                .where(db.Extraction.id == extraction_id, db.Extraction.claimed_by == token)
+                .values(lease_until=db.utcnow() + dt.timedelta(seconds=LEASE_SECONDS)))
+            await session.commit()
+            if not result.rowcount:
+                return
+
+
+async def _finish(extraction_id: str, status: str, token: str, *, error: Optional[str] = None,
                   snapshot: Optional[dict[str, Any]] = None, usage: Optional[dict] = None,
                   models: Optional[dict] = None, header: Optional[dict] = None,
                   retry: bool = False) -> None:
     async with db.session() as session:
-        extraction = await session.get(db.Extraction, extraction_id)
-        if extraction is None:
+        query = select(db.Extraction).where(db.Extraction.id == extraction_id)
+        if not db.is_sqlite():
+            query = query.with_for_update()
+        extraction = (await session.execute(query)).scalar()
+        if extraction is None or extraction.claimed_by != token:
+            log.warning("extraction %s: lease lost, result discarded", extraction_id)
             return
         document = await session.get(db.Document, extraction.document_id)
         if retry and extraction.attempts < MAX_ATTEMPTS:
             extraction.status = "queued"
+            extraction.claimed_by = None
             # Back off: the next claim waits until the lease lapses.
             extraction.lease_until = db.utcnow() + dt.timedelta(seconds=30 * 2 ** extraction.attempts)
             extraction.error = error
@@ -114,6 +146,7 @@ async def _finish(extraction_id: str, status: str, *, error: Optional[str] = Non
         extraction.status = status
         extraction.error = error
         extraction.lease_until = None
+        extraction.claimed_by = None
         extraction.finished_at = db.utcnow()
         if status == "ready":
             extraction.stage = "done"
@@ -123,11 +156,13 @@ async def _finish(extraction_id: str, status: str, *, error: Optional[str] = Non
             extraction.usage = usage
         if models is not None:
             extraction.models = models
+        if document is not None and header:
+            problem = await esource_relink(session, document, header, extraction.created_by,
+                                           reason="Read from the document header")
+            if problem and status == "ready":
+                status, error = "needs_input", problem
+            extraction.status, extraction.error = status, error
         if document is not None:
-            if header:
-                document.protocol_no = header.get("protocol_no") or document.protocol_no
-                document.screening_no = header.get("screening_no") or document.screening_no
-                document.visit_name = header.get("visit_name") or document.visit_name
             if status == "ready" and snapshot and snapshot.get("payload"):
                 stats = documents.summarise_payload(snapshot["payload"])
                 document.flags, document.conflicts = stats["flags"], stats["conflicts"]
@@ -182,7 +217,7 @@ def working_meta(meta: dict[str, Any]) -> dict[str, Any]:
     return {key: meta[key] for key in WORKING_KEYS if key in meta}
 
 
-async def _run(extraction_id: str) -> None:
+async def _run(extraction_id: str, token: str) -> None:
     import app as web  # the request handlers' own stages
     import cronos
     import edc
@@ -204,7 +239,7 @@ async def _run(extraction_id: str) -> None:
     primary, secondary = fields.read_models(True)
     models = {"primary": primary, "secondary": secondary, "preferred": fields.preferred_read()}
 
-    await _stage(extraction_id, "render")
+    await _stage(extraction_id, "render", token)
     data = await blobstore.get(sha)
     try:
         images = await render.page_images(data, web.MAX_PAGES)
@@ -220,7 +255,7 @@ async def _run(extraction_id: str) -> None:
                                    "pages": [{"page_number": int(n), "content": ""} for n in images]})
     await store.put_job(job_id, meta)
 
-    await _stage(extraction_id, "header")
+    await _stage(extraction_id, "header", token)
     header_response = await web._read_header(job_id, owner)
     confirmed = mapping.header_values(header_response["header"]["groups"])
     triple = {"protocol_no": str(confirmed.get("protocol_no") or "").strip(),
@@ -233,7 +268,7 @@ async def _run(extraction_id: str) -> None:
         raise NeedsInput(f"The header doesn't show the {', '.join(missing)}. Open it to fill "
                          "them in.", base_snapshot, triple)
 
-    await _stage(extraction_id, "visit")
+    await _stage(extraction_id, "visit", token)
     try:
         visit = await edc.get_visit(triple["protocol_no"], triple["screening_no"],
                                     triple["visit_name"])
@@ -249,40 +284,46 @@ async def _run(extraction_id: str) -> None:
                       "form": web._visit_view(definition),
                       "unsaveable": visit_forms.unsaveable(definition)}
 
-    await _stage(extraction_id, "read")
+    await _stage(extraction_id, "read", token)
     header_edits = {"protocol_no": triple["protocol_no"], "screening_no": triple["screening_no"],
                     "visit_name": confirmed.get("visit_name")}
     payload = await web._map_job(job_id, header_edits)
     snapshot = {"header": header_response, "visit": visit_response, "payload": payload,
                 "meta": working_meta(await store.get_job(job_id) or meta)}
-    await _finish(extraction_id, "ready", snapshot=snapshot, usage=payload.get("usage"),
+    await _finish(extraction_id, "ready", token, snapshot=snapshot, usage=payload.get("usage"),
                   models=models, header=triple)
 
 
-async def process(extraction_id: str) -> None:
+async def process(extraction_id: str, token: str) -> None:
     import edc
     import fields
 
     started = time.monotonic()
+    beat = asyncio.create_task(_heartbeat(extraction_id, token))
     try:
-        await _run(extraction_id)
-        log.info("extraction %s ready in %.1fs", extraction_id, time.monotonic() - started)
+        await _run(extraction_id, token)
+        log.info("extraction %s finished in %.1fs", extraction_id, time.monotonic() - started)
+    except LostLease:
+        log.warning("extraction %s was taken over by another worker", extraction_id)
     except Cancelled:
-        await _finish(extraction_id, "cancelled", error="Cancelled.")
+        await _finish(extraction_id, "cancelled", token, error="Cancelled.")
     except NeedsInput as exc:
         message, snapshot, triple = exc.args
-        await _finish(extraction_id, "needs_input", error=message, snapshot=snapshot,
+        await _finish(extraction_id, "needs_input", token, error=message, snapshot=snapshot,
                       header={k: v for k, v in triple.items() if v})
     except Permanent as exc:
-        await _finish(extraction_id, "failed", error=str(exc))
+        await _finish(extraction_id, "failed", token, error=str(exc))
     except (edc.EdcUnavailable, fields.ExtractionUnavailable, asyncio.TimeoutError) as exc:
-        await _finish(extraction_id, "failed", error=str(exc) or "Timed out.", retry=True)
+        await _finish(extraction_id, "failed", token, error=str(exc) or "Timed out.", retry=True)
     except blobstore.BlobCorrupted as exc:
-        await _finish(extraction_id, "failed", error=f"The stored original failed its integrity check: {exc}")
+        await _finish(extraction_id, "failed", token,
+                      error=f"The stored original failed its integrity check: {exc}")
     except Exception as exc:  # never lose a run silently
         log.exception("extraction %s crashed", extraction_id)
         detail = getattr(exc, "detail", None) or "Something went wrong while reading this file."
-        await _finish(extraction_id, "failed", error=str(detail), retry=True)
+        await _finish(extraction_id, "failed", token, error=str(detail), retry=True)
+    finally:
+        beat.cancel()
 
 
 # --------------------------------------------------------------------------- loop
@@ -300,7 +341,7 @@ async def _loop() -> None:
                 found = await _claim()
                 if not found:
                     break
-                task = asyncio.create_task(process(found))
+                task = asyncio.create_task(process(*found))
                 running.add(task)
                 task.add_done_callback(running.discard)
         except Exception as exc:

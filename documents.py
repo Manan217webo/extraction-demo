@@ -23,6 +23,17 @@ import db
 UPLOAD_SOURCE = "upload"
 DONE_STATUSES = {"ready", "in_review", "submitted"}
 ACTIVE_EXTRACTION = {"queued", "running"}
+# A run driven from the browser (an upload) has no worker lease; one left
+# untouched this long was abandoned and no longer blocks a re-read.
+INTERACTIVE_STALE = dt.timedelta(hours=1)
+
+
+def is_active(extraction: Optional[db.Extraction]) -> bool:
+    if extraction is None or extraction.status not in ACTIVE_EXTRACTION:
+        return False
+    if extraction.batch_id is None and extraction.status == "running":
+        return db.utcnow() - extraction.created_at < INTERACTIVE_STALE
+    return True
 
 
 def iso(value: Optional[dt.datetime]) -> Optional[str]:
@@ -39,20 +50,30 @@ class Ingested:
 
 
 async def ingest(session: AsyncSession, *, source_id: str, path: str, filename: str,
-                 data: bytes, username: str, pages: Optional[int] = None,
+                 username: str, data: Optional[bytes] = None,
+                 stored: Optional[tuple[str, str, int]] = None, pages: Optional[int] = None,
                  size: Optional[int] = None, modified: Optional[str] = None,
                  reason: Optional[str] = None, client_ip: Optional[str] = None) -> Ingested:
-    """Store the bytes and attach them to their document, adding a version if new."""
-    sha, blob_path = await blobstore.put(data)
+    """Attach stored bytes to their document, adding a version if they're new.
+
+    Pass `data` to store it here, or `stored=(sha256, path, size)` from an earlier
+    `blobstore.put` — the way to keep slow file I/O out of the transaction.
+    """
+    if stored is not None:
+        sha, blob_path, length = stored
+    else:
+        assert data is not None
+        sha, blob_path = await blobstore.put(data)
+        length = len(data)
     source_file = (await session.execute(
         select(db.SourceFile).where(db.SourceFile.sha256 == sha))).scalar()
     if source_file is None:
-        source_file = db.SourceFile(sha256=sha, size=len(data), pages=pages,
+        source_file = db.SourceFile(sha256=sha, size=length, pages=pages,
                                     blob_path=blob_path, first_seen_by=username)
         session.add(source_file)
         await session.flush()
         await audit.record(session, "file.ingested", username=username, client_ip=client_ip,
-                           field=filename, details={"sha256": sha, "size": len(data),
+                           field=filename, details={"sha256": sha, "size": length,
                                                     "source": source_id, "path": path})
 
     document = (await session.execute(
@@ -79,7 +100,7 @@ async def ingest(session: AsyncSession, *, source_id: str, path: str, filename: 
     await audit.record(session, "document.version_added", username=username, document=document,
                        client_ip=client_ip, new_value=f"v{number}", reason=reason,
                        details={"sha256": sha, "previous_sha256": current.sha256 if current else None,
-                                "path": path, "size": size or len(data), "modified": modified})
+                                "path": path, "size": size or length, "modified": modified})
     return Ingested(document, version, True)
 
 
@@ -150,7 +171,7 @@ async def classify(session: AsyncSession, source_id: str, path: str,
                                   db.Document.path == path))).scalar()
     if document is not None:
         active = await latest_extraction(session, document.id, ACTIVE_EXTRACTION)
-        if active is not None:
+        if is_active(active):
             return "processing", await prior_for(session, document)
         version = await latest_version(session, document.id)
         done = await latest_extraction(session, document.id, DONE_STATUSES)

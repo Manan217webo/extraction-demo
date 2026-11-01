@@ -12,6 +12,7 @@ migrations: a column is only ever added.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import uuid
@@ -22,7 +23,7 @@ from typing import Any, AsyncIterator, Optional
 from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer,
                         String, Text, TypeDecorator, UniqueConstraint, event, select, text)
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 SCHEMA_VERSION = 1
 
@@ -164,6 +165,9 @@ class Extraction(Base):
     finished_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     lease_until: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime(), index=True)
+    # The worker that holds the lease. Every progress write is conditional on
+    # it, so a run re-claimed after its lease lapsed can't be finished twice.
+    claimed_by: Mapped[Optional[str]] = mapped_column(String(64))
 
 
 class Batch(Base):
@@ -314,17 +318,60 @@ def is_sqlite() -> bool:
     return database_url().startswith("sqlite")
 
 
+_sqlite_lock: Optional[asyncio.Lock] = None
+
+
+def sqlite_chain_lock() -> asyncio.Lock:
+    global _sqlite_lock
+    if _sqlite_lock is None:
+        _sqlite_lock = asyncio.Lock()
+    return _sqlite_lock
+
+
+def _release_chain(sync_session, *_args) -> None:
+    held = sync_session.info.pop("audit_locked", None)
+    if isinstance(held, asyncio.Lock) and held.locked():
+        held.release()
+
+
+# The audit chain lock lives exactly as long as the transaction that took it.
+event.listen(Session, "after_commit", _release_chain)
+event.listen(Session, "after_rollback", _release_chain)
+
+
 @asynccontextmanager
 async def session() -> AsyncIterator[AsyncSession]:
     engine()
     assert _sessions is not None
     async with _sessions() as s:
-        yield s
+        try:
+            yield s
+        finally:
+            _release_chain(s.sync_session)
+
+
+def _add_missing_columns(sync_conn) -> list[str]:
+    """Schema changes here only ever add nullable columns; add any a table lacks."""
+    from sqlalchemy import inspect
+    inspector = inspect(sync_conn)
+    added = []
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        present = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in present:
+                continue
+            kind = column.type.compile(dialect=sync_conn.dialect)
+            sync_conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {column.name} {kind}'))
+            added.append(f"{table.name}.{column.name}")
+    return added
 
 
 async def init() -> None:
     async with engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_missing_columns)
         if not is_sqlite():
             # The audit trail is append-only at the database too, not just in code.
             await conn.execute(text("""

@@ -258,3 +258,23 @@ def test_audit_delivery_posts_in_order_and_backs_off(isolated, monkeypatch):
     assert [r["Action"] for r in records] == ["auth.login", "auth.logout"]
     assert records[1]["PrevHash"] == records[0]["Hash"]
     assert sent[0]["key"] == sent[1]["key"]  # the same batch retried is recognisable
+
+
+def test_reviewer_clearing_a_value_is_sent_but_an_unread_blank_is_not():
+    import visit_forms
+    form = {"sections": [{"section_id": "vitals", "fields": [
+        {"field_id": "sbp", "label": "SBP", "value": None, "status": "edited", "key": "vitals.sbp"},
+        {"field_id": "dbp", "label": "DBP", "value": None, "status": "empty", "key": "vitals.dbp"}]}]}
+    body, _ = visit_forms.build_save(_definition(), form, {})
+    assert {f["field_id"]: f["value"] for f in body["crfs"][0]["fields"]} == {101: ""}
+
+
+def test_crf_without_field_ids_is_sent_in_full():
+    import visit_forms
+    definition = _definition()
+    for f in definition["edc"]["crfs"][0]["fields"]:
+        f["field_id"] = None
+    form = {"sections": [{"section_id": "vitals", "fields": [
+        {"field_id": "dbp", "label": "DBP", "value": "85", "key": "vitals.dbp"}]}]}
+    body, _ = visit_forms.build_save(definition, form, {})
+    assert [f["value"] for f in body["crfs"][0]["fields"]] == ["120", "85", ""]
