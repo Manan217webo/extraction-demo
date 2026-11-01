@@ -31,6 +31,8 @@ from collections import Counter
 from difflib import SequenceMatcher
 from typing import Any, Optional
 
+import mapping
+
 log = logging.getLogger("extraction.visit_forms")
 
 # Below this the CRF is treated as unrecognised and rendered from the EDC alone;
@@ -655,6 +657,31 @@ def unsaveable(definition: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+_SPACES = re.compile(r"\s+")
+
+
+def same_value(new: str, existing: str) -> bool:
+    """True when a reviewed value says the same as what the EDC already holds.
+
+    Whitespace and letter case are not a change; neither is the same date or
+    number written another way ("16 Feb 2026" / "16/02/2026", "7.0" / "7").
+    Anything else is.
+    """
+    left = _SPACES.sub(" ", (new or "").strip()).casefold()
+    right = _SPACES.sub(" ", (existing or "").strip()).casefold()
+    if left == right:
+        return True
+    if not left or not right:
+        return False
+    first, second = mapping.parse_date(left), mapping.parse_date(right)
+    if first and second:
+        return first == second
+    try:
+        return float(left) == float(right)
+    except ValueError:
+        return False
+
+
 def _as_text(value: Any) -> str:
     if value is None:
         return ""
@@ -667,18 +694,24 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                crops: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], list[str]]:
     """The SaveVisitCRFData body for a reviewed form, and anything worth flagging.
 
-    Every field the EDC gave us is sent back, in the order it arrived, carrying
-    the value it already held unless the review replaced it.  Sending the whole
-    list is what makes the payload unambiguous: five fields are all called
-    "Result", so position is the only thing that distinguishes them — and sending
-    only the filled ones would leave the EDC to guess which row each belonged to.
-    Fields nobody touched keep their existing value rather than being blanked.
+    Only fields whose reviewed value differs from what the EDC already holds are
+    sent. A value the scan read that the EDC already has is not written again —
+    re-sending it would add a no-op change to the EDC's own audit trail and
+    attach a source image to a value nobody changed. A CRF with nothing to change
+    is left out entirely, and when no CRF changes the body has no CRFs: the caller
+    then skips the EDC call. Each sent field still carries its `field_id`, which
+    is how the EDC tells same-named fields apart.
+
+    The body carries a `_delta` summary (popped by the caller before sending):
+    what changed, from what to what, and what was skipped as already equal.
     """
     edc = definition["edc"]
     by_section = {crf["section_id"]: crf for crf in edc["crfs"]}
     warnings: list[str] = []
     crfs: list[dict[str, Any]] = []
     used_crops: set[str] = set()
+    changes: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
     for section in form.get("sections") or []:
         meta = by_section.get(section["section_id"])
@@ -706,8 +739,15 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                     f"hold ({', '.join(sorted(blocking))}). It was left unchanged in the EDC."
                 )
                 return
-            if field.get("value") is not None:
-                values[index] = _as_text(field["value"])
+            if field.get("value") is None:
+                return
+            new_value = _as_text(field["value"])
+            existing = meta["fields"][index].get("value") or ""
+            if same_value(new_value, existing):
+                skipped.append({"crfName": meta["crfName"], "label": field.get("label"),
+                                "value": new_value})
+                return
+            values[index] = new_value
             # The browser keys crops by field.key. The reconstructed address is
             # the fallback when a payload was built without keys.
             crop_key = field.get("key") or key
@@ -773,6 +813,16 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 "base64Data": crop["base64Data"],
             })
 
+        if not values:
+            # Nothing on this CRF differs from the EDC: send nothing for it, not
+            # even the page images.
+            used_crops.update(k for k in crops if k.startswith(f"{section['section_id']}."))
+            continue
+        for index, value in values.items():
+            slot = meta["fields"][index]
+            changes.append({"crfName": meta["crfName"], "crfId": meta["crfId"],
+                            "field_id": slot.get("field_id"), "fieldName": slot["fieldName"],
+                            "old": slot.get("value") or "", "new": value})
         crf: dict[str, Any] = {
             "crfName": meta["crfName"],
             "crfId": meta["crfId"],
@@ -782,8 +832,8 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
             # section sequence — is layout, not data, and is not echoed back;
             # nor is the source crop, which travels in `images` alone. A
             # deployment still on bare names gets `fieldName` and `value`.
-            "fields": [_save_field(field, values.get(field["index"], field.get("value") or ""))
-                       for field in meta["fields"]],
+            "fields": [_save_field(field, values[field["index"]])
+                       for field in meta["fields"] if field["index"] in values],
             "images": images,
         }
         crfs.append(crf)
@@ -802,5 +852,6 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         "screeningNo": edc["screeningNo"],
         "visitName": edc["visitName"],
         "crfs": crfs,
+        "_delta": {"changes": changes, "skipped": skipped},
     }
     return payload, warnings

@@ -1879,3 +1879,10 @@ mark.current { background: var(--purple); color: #fff; }
 .pdf-hl { transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
 .dropzone, .mode, .file-card { transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease),
                                             transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+
+.use-other {
+  border: 1px solid var(--line, #d9d4e6); background: transparent; color: inherit;
+  font: inherit; font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 999px;
+  cursor: pointer; transition: background .15s ease, border-color .15s ease;
+}
+.use-other:hover { background: rgba(92, 86, 107, .08); border-color: currentColor; }

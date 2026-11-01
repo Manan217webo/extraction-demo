@@ -1206,6 +1206,7 @@ async def save_visit(job_id: str, request: VisitSaveRequest,
 
     body, warnings = visit_forms.build_save(definition, reviewed.get("form") or {},
                                             request.crops)
+    delta = body.pop("_delta", {"changes": [], "skipped": []})
 
     refused = edc.check_images(body["crfs"])
     if refused:
@@ -1221,10 +1222,15 @@ async def save_visit(job_id: str, request: VisitSaveRequest,
     if request.crops and not counts["images"]:
         log.warning("visit save for %s: crop keys did not match any field: %s",
                     job_id, list(request.crops)[:20])
+    counts["unchanged"] = len(delta["skipped"])
     if request.dry_run:
         log.info("visit save for %s: dry run, nothing sent", job_id)
-        return {"sent": False, "dry_run": True, "counts": counts,
+        return {"sent": False, "dry_run": True, "counts": counts, "delta": delta,
                 "warnings": warnings, "payload": body}
+    if not body["crfs"]:
+        log.info("visit save for %s: every value already matches the EDC, nothing sent", job_id)
+        return {"sent": False, "unchanged": True, "counts": counts, "delta": delta,
+                "warnings": warnings}
 
     try:
         result = await edc.save_visit(body)
@@ -1247,7 +1253,8 @@ async def save_visit(job_id: str, request: VisitSaveRequest,
         await store.audit_save(audit)
     except Exception as exc:
         log.warning("audit log write failed: %s", exc)
-    return {"sent": True, "counts": counts, "warnings": warnings, "result": result}
+    return {"sent": True, "counts": counts, "delta": delta, "warnings": warnings,
+            "result": result}
 
 
 class LocateRequest(BaseModel):

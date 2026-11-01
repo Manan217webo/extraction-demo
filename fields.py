@@ -833,6 +833,35 @@ def second_read_model() -> Optional[str]:
     return configured_model or model_name()
 
 
+# Size words in a model name, smallest first. A name with none of them is the
+# family's standard size. Only used to choose a winner when two reads conflict.
+_SIZE_RANK = (("nano", 0), ("tiny", 0), ("mini", 1), ("small", 1), ("lite", 1),
+              ("flash", 1), ("haiku", 1), ("large", 3), ("pro", 3), ("max", 3),
+              ("ultra", 3), ("opus", 3))
+
+
+def model_rank(model: Optional[str]) -> int:
+    name = (model or "").lower()
+    ranks = [rank for word, rank in _SIZE_RANK if re.search(rf"(^|[-_.\s]){word}($|[-_.\s\d])", name)]
+    return min(ranks) if ranks else 2
+
+
+def preferred_read() -> str:
+    """Which read's value stands when the two reads disagree: "first" or "second".
+
+    The bigger model wins. OPENAI_PREFERRED_READ=first|second says which one that
+    is outright; otherwise the size words in the model names decide, and a tie
+    goes to the first read (OPENAI_MODEL), the one the deployment chose as primary.
+    """
+    explicit = (os.getenv("OPENAI_PREFERRED_READ") or "").strip().lower()
+    if explicit in {"first", "second"}:
+        return explicit
+    second = second_read_model()
+    if second and model_rank(second) > model_rank(model_name()):
+        return "second"
+    return "first"
+
+
 # Two reads that disagree, or a value the page shows was corrected, are where a
 # reviewer has to look — the score says so even if the model was sure.
 DISAGREE_CONFIDENCE = 0.4
@@ -866,8 +895,16 @@ def _address_key(row: dict[str, Any]) -> tuple:
 
 
 def reconcile(first: list[dict[str, Any]],
-              second: Optional[list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """One row per field, scored by whether two independent reads agree."""
+              second: Optional[list[dict[str, Any]]],
+              prefer_second: Optional[bool] = None) -> list[dict[str, Any]]:
+    """One row per field, scored by whether two independent reads agree.
+
+    Where both reads saw a value and the values conflict, the bigger model's
+    value is kept (see `preferred_read`) and the other is carried as
+    `second_value` — "the other read's value", whichever read that was.
+    """
+    if prefer_second is None:
+        prefer_second = preferred_read() == "second"
     if second is None:
         for row in first:
             if row["corrected"]:
@@ -895,11 +932,22 @@ def reconcile(first: list[dict[str, Any]],
                        corrected=row["corrected"] or other["corrected"],
                        struck_value=row["struck_value"] or other["struck_value"],
                        confidence=min(other["confidence"], ONE_READ_CONFIDENCE))
+        elif other_value is not None and prefer_second:
+            # Both reads saw a value and they conflict: the bigger model's stands.
+            # The other value stays on the row so the reviewer can take it instead.
+            row.update(agreed=False, second_value=row["value"], value=other_value,
+                       evidence=other["evidence"] or row["evidence"],
+                       page=other["page"] or row["page"], chosen_read="second",
+                       corrected=row["corrected"] or other["corrected"],
+                       struck_value=other["struck_value"] or row["struck_value"],
+                       confidence=min(other["confidence"], DISAGREE_CONFIDENCE))
         else:
             row["agreed"] = False
             row["second_value"] = other_value
             if other_value is None:
                 row["one_read"] = True
+            else:
+                row["chosen_read"] = "first"
             row["confidence"] = min(row["confidence"], DISAGREE_CONFIDENCE)
         if row["corrected"]:
             row["confidence"] = min(row["confidence"], CORRECTED_CONFIDENCE)

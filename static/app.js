@@ -1593,8 +1593,33 @@ function renderField(field, { compact = false } = {}) {
     if (reading.reads > 1 && !reading.agreed && !reading.one_read) {
       const other = document.createElement("span");
       other.className = "second-read";
+      const kept = reading.chosen_read === "second" ? state.reader?.second_read : state.reader?.model;
       other.textContent = `Other read: ${reading.second_value ?? "blank"}`;
+      other.title = kept
+        ? `The two reads disagreed. The value from the larger model (${kept}) is shown.`
+        : "The two reads disagreed.";
       meta.appendChild(other);
+      if (reading.second_value !== null && reading.second_value !== undefined && !state.readOnly) {
+        const use = document.createElement("button");
+        use.type = "button";
+        use.className = "use-other";
+        use.textContent = "Use this";
+        use.title = "Replace the value with the other read's";
+        use.addEventListener("click", (event) => {
+          event.stopPropagation();
+          const previous = field.value;
+          field.value = reading.second_value;
+          field.reading = { ...reading, second_value: previous };
+          field.status = "edited";
+          field.issues = (field.issues || []).filter((code) => !READING_ISSUES.has(code));
+          const fresh = renderField(field, { compact });
+          row.replaceWith(fresh);
+          refreshHighlights();
+          saveSession();
+          toast(`Using the other read: ${field.value}`, "success", 4200);
+        });
+        meta.appendChild(use);
+      }
     }
   }
   if (source.evidence) {
@@ -2624,7 +2649,14 @@ async function saveToEdc() {
     (result.warnings || []).forEach((warning) => inlineNotice(els.formSections, warning));
     state.lastSave = result.counts || null;
     markSavedToEdc();
-    toast("Saved to Cronos");
+    if (result.unchanged) {
+      toast("Every value already matches the EDC — nothing was sent", "info", 4200);
+    } else {
+      const changed = (result.delta && result.delta.changes || []).length;
+      const skipped = (result.counts && result.counts.unchanged) || 0;
+      toast(`Saved ${changed} changed value${changed === 1 ? "" : "s"} to Cronos` +
+        (skipped ? ` · ${skipped} already matched` : ""));
+    }
     els.extractedScroll.scrollTop = 0;
     saveSessionNow();
   } catch (error) {

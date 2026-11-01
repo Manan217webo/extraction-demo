@@ -187,6 +187,8 @@ def _reading(row: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
         reading["agreed"] = bool(row.get("agreed"))
         if not row.get("agreed"):
             reading["second_value"] = row.get("second_value")
+            if row.get("chosen_read"):
+                reading["chosen_read"] = row["chosen_read"]
         if row.get("one_read"):
             reading["one_read"] = True
     return reading or None
