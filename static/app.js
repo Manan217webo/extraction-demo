@@ -140,6 +140,18 @@ const state = {
   username: null,
   readOnly: false,
   tabId: Math.random().toString(36).slice(2),
+
+  // The server's record of this review. A local upload gets one too (POST
+  // /documents answers with document_id), so drafts and submit work for both.
+  docId: null,
+  extractionId: null,
+  user: null,            // {username, full_name, role}
+  edits: [],             // [{key, label, old, new, reason_code, reason_text, kind}]
+  draftRevision: 0,      // base_revision for the next draft save
+  sentKeys: [],          // field keys the last submit sent to the EDC
+  signature: null,       // {full_name, meaning, signed_at}
+  submitted: null,       // {submitted_at, submitted_by}
+  serverReadOnly: false, // readonly as the server sees it (role, submitted, lease)
 };
 
 const STAGE_ORDER = ["upload", "queue", "read", "finish", "fields"];
@@ -178,28 +190,60 @@ function activeMode() {
 
 let onUnauthorized = null;
 
+/* `quiet401`: a 401 that is an answer, not an expired session — the
+   e-signature password check answers 401 and must not sign the reviewer out.
+   Errors carry `status` and the parsed body as `data`; a network failure has
+   status 0 and `offline: true`. */
 async function api(path, options) {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...(options || {}),
-  });
+  const { quiet401, ...init } = options || {};
+  let response;
+  try {
+    response = await fetch(path, { credentials: "same-origin", ...init });
+  } catch (cause) {
+    const error = new Error("We couldn't reach the server. Check your connection and try again.");
+    error.status = 0;
+    error.offline = true;
+    error.cause = cause;
+    throw error;
+  }
   let data = {};
   try {
     data = await response.json();
   } catch {
     /* non-JSON responses fall through to the generic message below */
   }
-  if (response.status === 401 && path !== "/api/login") {
+  if (response.status === 401 && path !== "/api/login" && !quiet401) {
     if (typeof onUnauthorized === "function") onUnauthorized();
-    throw new Error(data.detail || "Please sign in to continue.");
+    const error = new Error(data.detail || "Please sign in to continue.");
+    error.status = 401;
+    error.data = data;
+    throw error;
   }
   if (!response.ok) {
+    // `detail` is usually a sentence; a draft conflict sends an object
+    // ({message, revision, saved_by, saved_at}) and validation sends a list.
     const detail = Array.isArray(data.detail)
       ? data.detail.map((d) => d.msg || "").join(" ")
-      : data.detail;
-    throw new Error(detail || "Something went wrong. Please try again.");
+      : data.detail && typeof data.detail === "object"
+        ? data.detail.message || ""
+        : data.detail;
+    const error = new Error(detail || "Something went wrong. Please try again.");
+    error.status = response.status;
+    error.data = data;
+    throw error;
   }
   return data;
+}
+
+/* The draft/submit/flag layer lives in /static/js/edc.js. It may load after
+   this file (it is deferred), so every call into it is guarded. */
+function edc() {
+  return window.EDC || null;
+}
+
+function notifyFormChanged() {
+  const layer = edc();
+  if (layer && layer.formChanged) layer.formChanged();
 }
 
 const MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -424,6 +468,7 @@ async function runExtraction() {
   // The old review goes first. Until the new parse finishes and saves, a
   // refresh would otherwise bring the previous document's values back.
   resetMapping();
+  resetReviewIdentity();
   state.fileBytes = null;
   state.savedName = null;
   state.bytesDropped = false;
@@ -436,6 +481,8 @@ async function runExtraction() {
 
   try {
     const job = await api("/api/documents", { method: "POST", body });
+    state.docId = job.document_id != null ? String(job.document_id) : null;
+    state.extractionId = job.extraction_id != null ? job.extraction_id : null;
     setStage("queue");
     if (!state.pages && job.page_count) {
       state.pages = job.page_count;
@@ -522,6 +569,12 @@ async function pollOnce(jobId) {
     }
     refreshCredits(true);
     els.runBtn.disabled = false;
+    // Inside the app shell the review gets an address of its own, so a reload
+    // or a shared link comes back to it. Review.open() sees the same document
+    // already showing and leaves it alone.
+    if (state.docId && window.WH && window.WH.router) {
+      location.hash = `#/review/${encodeURIComponent(state.docId)}`;
+    }
     return true;
   }
   if (status === "FAILED" || status === "CANCELLED") {
@@ -557,7 +610,8 @@ function showResult(data, landing, options = {}) {
   state.result = data;
   // Fixed once, so a restored session still reports how long the read took
   // rather than how long ago it happened.
-  if (data.elapsed_seconds == null) {
+  // A review opened from the server never timed its read here; it shows none.
+  if (data.elapsed_seconds == null && !options.preserveMapping) {
     data.elapsed_seconds = Math.max(1, Math.round((Date.now() - state.startedAt) / 1000));
   }
   const mode = state.modes.find((m) => m.id === data.mode);
@@ -574,7 +628,7 @@ function showResult(data, landing, options = {}) {
     `${accuracy}% PDF accuracy`,
     mode ? mode.name : null,
     data.credits_used != null ? `${fmt(Math.round(data.credits_used))} credits used` : null,
-    `${data.elapsed_seconds}s`,
+    data.elapsed_seconds != null ? `${data.elapsed_seconds}s` : null,
   ].filter(Boolean);
   chips.forEach((text) => {
     const chip = document.createElement("span");
@@ -635,7 +689,22 @@ function showResult(data, landing, options = {}) {
   });
 }
 
+/* Who this review is on the server. Kept apart from resetMapping(): a fresh
+   upload resets the mapping on its way to the viewer but keeps its document. */
+function resetReviewIdentity() {
+  state.docId = null;
+  state.extractionId = null;
+  state.serverReadOnly = false;
+  state.submitted = null;
+  if (state.readOnly) setReadOnly(false);
+}
+
 function closeViewer() {
+  const layer = edc();
+  // Never lose a pending draft on the way out: send it now rather than ask.
+  if (layer && layer.flush) layer.flush();
+  openToken = null;
+  hideOpenSkeleton();
   els.viewer.classList.add("hidden");
   document.body.classList.remove("viewing");
   if (state.objectUrl) {
@@ -647,6 +716,8 @@ function closeViewer() {
     state.pdf = null;
   }
   resetMapping();
+  resetReviewIdentity();
+  state.result = null;
   state.fileBytes = null;
   state.savedName = null;
   clearCurrentPointer();
@@ -655,6 +726,7 @@ function closeViewer() {
   setFile(null);
   renderRecentMenu().catch(() => {});
   window.scrollTo({ top: 0, behavior: "smooth" });
+  window.dispatchEvent(new CustomEvent("wh:review-closed"));
 }
 
 function setLayout(layout) {
@@ -891,10 +963,29 @@ let saveTimer = null;
 let savingToEdc = false;
 let tabChannel = null;
 
+const TAB_BANNER_TEXT = els.tabBanner ? els.tabBanner.textContent.trim() : "";
+
+/* Two reasons a review is read-only: another tab holds it (the lease below),
+   or the server says so (a monitor, or a record that is not this reviewer's
+   to change). The server's word is not undone by the tab lease. */
 function setReadOnly(on) {
-  state.readOnly = Boolean(on);
+  state.readOnly = Boolean(on) || state.serverReadOnly;
   document.body.classList.toggle("read-only", state.readOnly);
-  if (els.tabBanner) els.tabBanner.classList.toggle("hidden", !state.readOnly);
+  if (els.tabBanner) {
+    els.tabBanner.classList.toggle("hidden", !state.readOnly);
+    els.tabBanner.textContent = state.serverReadOnly
+      ? readOnlyReason()
+      : TAB_BANNER_TEXT;
+  }
+  const layer = edc();
+  if (layer && layer.readOnlyChanged) layer.readOnlyChanged(state.readOnly);
+}
+
+function readOnlyReason() {
+  const role = state.user && state.user.role;
+  if (role === "monitor") return "You're viewing this review as a monitor. Values can't be changed here.";
+  if (state.submitted) return "This review has been submitted and is open read-only.";
+  return "This review is open read-only.";
 }
 
 function wireTabLease(jobId) {
@@ -1025,6 +1116,16 @@ async function writeSession() {
     step: state.step,
     filename: state.file ? state.file.name : state.savedName || null,
     bytes: state.fileBytes || null,
+    // The server side of the review. The mirror is what "Offline — saved on
+    // this device" means: a draft that could not be sent survives a reload.
+    docId: state.docId,
+    extractionId: state.extractionId,
+    edits: state.edits || [],
+    draftRevision: state.draftRevision || 0,
+    draftPending: Boolean(edc() && edc().isDirty && edc().isDirty()),
+    sentKeys: state.sentKeys || [],
+    signature: state.signature || null,
+    submitted: state.submitted || null,
   };
   try {
     await storeAction("readwrite", (store) => {
@@ -1079,6 +1180,11 @@ async function restoreSession(jobId) {
     console.warn("no session restored", error);
   }
   if (!saved || !saved.result) return false;
+  // Leaving whatever is open: send its pending draft before state changes.
+  if (edc()) {
+    if (edc().flush) edc().flush();
+    if (edc().reset) edc().reset();
+  }
   // A snapshot that does not name its document is from before this check and
   // cannot be trusted to belong to anything in particular.
   if (!saved.jobId || saved.jobId !== saved.result.job_id) return false;
@@ -1096,6 +1202,9 @@ async function restoreSession(jobId) {
   state.savedName = saved.filename || null;
   state.unsaveable = saved.unsaveable || [];
   state.edcSaved = Boolean(saved.edcSaved);
+  state.docId = saved.docId || null;
+  state.extractionId = saved.extractionId || null;
+  state.serverReadOnly = false;
 
   const landing =
     saved.step === "form" && saved.payload ? "form" : "header";
@@ -1103,6 +1212,11 @@ async function restoreSession(jobId) {
   state.header = saved.header || null;
   state.payload = saved.payload || null;
   state.visit = saved.visit || null;
+  state.edits = Array.isArray(saved.edits) ? saved.edits : [];
+  state.draftRevision = saved.draftRevision || 0;
+  state.sentKeys = saved.sentKeys || [];
+  state.signature = saved.signature || null;
+  state.submitted = saved.submitted || null;
 
   showResult(saved.result, landing, { preserveMapping: true, deferStep: true });
   wireTabLease(saved.jobId);
@@ -1127,6 +1241,9 @@ async function restoreSession(jobId) {
 
   setStep(landing);
   els.extractedScroll.scrollTop = 0;
+  if (edc() && edc().reviewLoaded) {
+    edc().reviewLoaded({ pending: Boolean(saved.draftPending), source: "device" });
+  }
   await storeAction("readwrite", (store) => store.put(saved.jobId, CURRENT_KEY)).catch(() => {});
   return true;
 }
@@ -1191,15 +1308,19 @@ function resetMapping() {
   state.forms = [];
   state.selectedKey = null;
   state.edcSaved = false;
+  state.edits = [];
+  state.draftRevision = 0;
+  state.sentKeys = [];
+  state.signature = null;
   savingToEdc = false;
   els.headerGroups.innerHTML = "";
   els.formSections.innerHTML = "";
   els.formList.innerHTML = "";
   els.formBody.classList.add("hidden");
   els.formPicker.classList.remove("hidden");
-  els.sendCronos.disabled = false;
-  els.sendCronos.textContent = "Save to EDC";
+  resetSubmitButton();
   setHighlights([]);
+  if (edc() && edc().reset) edc().reset();
   [...els.stepper.querySelectorAll("button")].forEach((button) => {
     button.disabled = true;
     button.classList.remove("done");
@@ -1332,8 +1453,10 @@ function status(container, opts) {
 
 /* ------------------------------------------------------------------ toast
 
-   For confirmations that need no reply: copied, saved. Low, brief, gone. */
-function toast(text, kind = "success", ttl = 2400) {
+   For confirmations that need no reply: copied, saved. Low, brief, gone.
+   An optional action ({label, onClick}) — "Undo" — keeps the toast up a
+   little longer and closes it when used. */
+function toast(text, kind = "success", ttl = 2400, action = null) {
   let host = document.querySelector(".toast-host");
   if (!host) {
     host = document.createElement("div");
@@ -1345,10 +1468,26 @@ function toast(text, kind = "success", ttl = 2400) {
   node.setAttribute("role", "status");
   const icon = document.createElement("span");
   icon.className = "toast-icon";
-  icon.innerHTML = kind === "success" ? STATUS_ICONS.success : STATUS_ICONS.error;
+  icon.innerHTML = STATUS_ICONS[kind] || STATUS_ICONS.info;
   const label = document.createElement("span");
   label.textContent = text;
   node.append(icon, label);
+  if (action && action.label) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toast-action";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        action.onClick();
+      } finally {
+        leave(node);
+      }
+    });
+    node.appendChild(button);
+  }
   host.appendChild(node);
   leave(node, ttl);
   return node;
@@ -1562,6 +1701,32 @@ function renderField(field, { compact = false } = {}) {
     edited.textContent = field.status === "manual" ? "Entered by you" : "Edited";
     meta.appendChild(edited);
   }
+  // Why the value changed (GCP). The tag opens the reason picker again.
+  const layer = edc();
+  const edit = layer && layer.editFor ? layer.editFor(field.key) : null;
+  if (edit) {
+    row.classList.add("has-edit");
+    const tag = document.createElement("button");
+    tag.type = "button";
+    tag.className = `reason-tag${edit.reason_defaulted ? " is-default" : ""}`;
+    tag.textContent = layer.reasonLabel(edit);
+    tag.title = edit.reason_defaulted
+      ? "Reason applied by default — click to change it"
+      : "Reason for change — click to change it";
+    tag.addEventListener("click", (event) => {
+      event.stopPropagation();
+      layer.promptReason(field.key, { focus: true });
+    });
+    meta.appendChild(tag);
+  }
+  if ((state.sentKeys || []).includes(field.key)) {
+    row.classList.add("is-sent");
+    const sent = document.createElement("span");
+    sent.className = "sent-mark";
+    sent.textContent = "Sent";
+    sent.title = "This value was sent to the EDC with the last submission";
+    meta.appendChild(sent);
+  }
   if (field.value !== null && typeof field.confidence === "number") {
     const score = document.createElement("span");
     const pct = Math.round(field.confidence * 100);
@@ -1591,6 +1756,7 @@ function renderField(field, { compact = false } = {}) {
       meta.appendChild(struck);
     }
     if (reading.reads > 1 && !reading.agreed && !reading.one_read) {
+      row.classList.add("has-conflict");
       const other = document.createElement("span");
       other.className = "second-read";
       const kept = reading.chosen_read === "second" ? state.reader?.second_read : state.reader?.model;
@@ -1607,16 +1773,7 @@ function renderField(field, { compact = false } = {}) {
         use.title = "Replace the value with the other read's";
         use.addEventListener("click", (event) => {
           event.stopPropagation();
-          const previous = field.value;
-          field.value = reading.second_value;
-          field.reading = { ...reading, second_value: previous };
-          field.status = "edited";
-          field.issues = (field.issues || []).filter((code) => !READING_ISSUES.has(code));
-          const fresh = renderField(field, { compact });
-          row.replaceWith(fresh);
-          refreshHighlights();
-          saveSession();
-          toast(`Using the other read: ${field.value}`, "success", 4200);
+          useAlternateRead(field, row, compact);
         });
         meta.appendChild(use);
       }
@@ -1631,10 +1788,12 @@ function renderField(field, { compact = false } = {}) {
   if (meta.childNodes.length) wrap.appendChild(meta);
 
   const commit = () => {
+    if (state.readOnly) return;
     const next = control.read();
     if (String(next === null ? "" : next) === String(field.value === null ? "" : field.value)) {
       return;
     }
+    const previous = field.value;
     field.value = next;
     field.status = field.status === "empty" || field.value === null ? "manual" : "edited";
     field.confidence = null;
@@ -1642,14 +1801,24 @@ function renderField(field, { compact = false } = {}) {
     // The reviewer has made the call these flags asked for. Type and range
     // checks stay until the server revalidates the new value.
     field.issues = (field.issues || []).filter((code) => !READING_ISSUES.has(code));
-    row.classList.remove("is-empty", "is-flagged");
-    const freshMeta = renderField(field, { compact }).querySelector(".field-meta");
+    row.classList.remove("is-empty", "is-flagged", "has-conflict");
+    // Recorded before the meta line is redrawn, so the reason tag is on it.
+    const layer = edc();
+    if (layer && layer.recordEdit) {
+      layer.recordEdit({ field, old: previous, value: next, kind: "edit" });
+    }
+    const fresh = renderField(field, { compact });
+    const freshMeta = fresh.querySelector(".field-meta");
     const oldMeta = wrap.querySelector(".field-meta");
     if (oldMeta && freshMeta) oldMeta.replaceWith(freshMeta);
     else if (oldMeta) oldMeta.remove();
     else if (freshMeta) wrap.appendChild(freshMeta);
+    ["has-edit", "is-sent", "is-flagged"].forEach((name) =>
+      row.classList.toggle(name, fresh.classList.contains(name)));
     refreshHighlights();
     saveSession();
+    notifyFormChanged();
+    if (layer && layer.promptReason) layer.promptReason(field.key);
   };
   control.node.addEventListener("change", commit);
   control.node.addEventListener("blur", commit, true);
@@ -1682,6 +1851,110 @@ function renderFieldGroup(title, fields, note) {
   }
   fields.forEach((field) => group.appendChild(renderField(field)));
   return group;
+}
+
+/* ------------------------------------------------------- alternate read
+
+   The two reads disagreed and the reviewer takes the other one. It is a
+   change of value like any other, so it is recorded with its reason
+   (ALTERNATE_AI_READ) — and it can be undone from the toast, which puts back
+   the field exactly as it was, edit record included. */
+function useAlternateRead(field, row, compact) {
+  if (state.readOnly) return;
+  const reading = field.reading || {};
+  if (reading.second_value === null || reading.second_value === undefined) return;
+  const before = JSON.parse(JSON.stringify({
+    value: field.value ?? null,
+    reading: field.reading || null,
+    status: field.status ?? null,
+    issues: field.issues || [],
+    confidence: field.confidence ?? null,
+  }));
+  const previous = field.value;
+  field.value = reading.second_value;
+  field.reading = {
+    ...reading,
+    second_value: previous,
+    chosen_read: reading.chosen_read === "second" ? "first" : "second",
+  };
+  field.status = "edited";
+  field.issues = (field.issues || []).filter((code) => !READING_ISSUES.has(code));
+
+  const layer = edc();
+  const priorEdit = layer && layer.recordEdit
+    ? layer.recordEdit({
+      field, old: previous, value: field.value, kind: "alternate",
+      reason_code: "ALTERNATE_AI_READ",
+    })
+    : null;
+  const live = row && row.isConnected ? row : rowFor(field.key);
+  if (live) live.replaceWith(renderField(field, { compact }));
+  refreshHighlights();
+  saveSession();
+  notifyFormChanged();
+  toast(`Using the other read: ${field.value}`, "success", 6500, {
+    label: "Undo",
+    onClick: () => {
+      Object.assign(field, before);
+      if (layer && layer.restoreEdit) layer.restoreEdit(field.key, priorEdit);
+      rerenderField(field.key);
+      refreshHighlights();
+      saveSession();
+      notifyFormChanged();
+      toast("Put back the value that was there", "info", 2400);
+    },
+  });
+}
+
+function rowFor(key) {
+  return els.extractedScroll.querySelector(`.field[data-key="${cssEscape(key)}"]`);
+}
+
+/* Every field on the form and the header, in reading order. */
+function allFields() {
+  const out = [];
+  ((state.header || {}).header || { groups: [] }).groups.forEach((group) =>
+    (group.fields || []).forEach((field) => out.push(field)));
+  const form = state.payload && state.payload.form;
+  ((form || {}).sections || []).forEach((section) => {
+    (section.fields || []).forEach((field) => out.push(field));
+    (section.groups || []).forEach((group) =>
+      (group.instances || []).forEach((instance) =>
+        (instance.fields || []).forEach((field) => out.push(field))));
+  });
+  return out;
+}
+
+function fieldByKey(key) {
+  return allFields().find((field) => field.key === key) || null;
+}
+
+/* Redraw one field in place (value, meta, marks). */
+function rerenderField(key) {
+  const field = fieldByKey(key);
+  const row = rowFor(key);
+  if (!field || !row) return null;
+  const fresh = renderField(field, { compact: row.classList.contains("is-compact") });
+  if (row.classList.contains("is-selected")) fresh.classList.add("is-selected");
+  row.replaceWith(fresh);
+  return fresh;
+}
+
+/* Only the meta line, so an input mid-edit is left alone. */
+function refreshMetaFor(keys) {
+  keys.forEach((key) => {
+    const field = fieldByKey(key);
+    const row = rowFor(key);
+    if (!field || !row) return;
+    const fresh = renderField(field, { compact: row.classList.contains("is-compact") });
+    const oldMeta = row.querySelector(".field-meta");
+    const newMeta = fresh.querySelector(".field-meta");
+    if (oldMeta && newMeta) oldMeta.replaceWith(newMeta);
+    else if (oldMeta) oldMeta.remove();
+    else if (newMeta) row.querySelector(".field-input").appendChild(newMeta);
+    ["has-edit", "is-sent", "is-flagged", "has-conflict"].forEach((name) =>
+      row.classList.toggle(name, fresh.classList.contains(name)));
+  });
 }
 
 /* ------------------------------------------------------- selection linking */
@@ -2085,6 +2358,7 @@ function renderForm(payload) {
 
   payload.highlights = boxesToDraw(payload.form);
   setHighlights(payload.highlights);
+  notifyFormChanged();
 }
 
 function renderGroupTable(group, columns) {
@@ -2460,6 +2734,7 @@ function refreshFieldMeta(keys) {
     else if (newMeta) row.querySelector(".field-input").appendChild(newMeta);
     row.classList.toggle("is-flagged", (field.issues || []).length > 0);
   });
+  notifyFormChanged();
 }
 
 /* Write the located rectangles onto the fields they belong to. */
@@ -2591,87 +2866,58 @@ function cropTargets(form) {
   return items;
 }
 
+const SUBMIT_LABEL = "Submit to EDC";
+
+function resetSubmitButton() {
+  const button = els.sendCronos;
+  button.classList.remove("is-loading", "is-done");
+  button.disabled = false;
+  button.textContent = SUBMIT_LABEL;
+}
+
+/* After a signed submission. The button says so; a later edit re-opens it
+   (edc.js calls resetSubmitButton), since the new value has not been sent. */
 function markSavedToEdc() {
   state.edcSaved = true;
   savingToEdc = false;
-  buttonDone(els.sendCronos, "Saved to Cronos");
-  els.formSections.querySelectorAll("[data-edc-saved]").forEach((el) => el.remove());
-  const counts = state.lastSave;
-  const detail = counts
-    ? `${counts.values} value${counts.values === 1 ? "" : "s"} across ${counts.fields} field${counts.fields === 1 ? "" : "s"}, ` +
-      `with ${counts.images} source image${counts.images === 1 ? "" : "s"} attached.`
-    : "The values and their source images are now in the EDC.";
-  const node = statusNode({ kind: "success", title: "Saved to Cronos", detail });
-  node.dataset.edcSaved = "1";
-  els.formSections.prepend(node);
+  buttonDone(els.sendCronos, "Submitted");
 }
 
-async function saveToEdc() {
-  if (!state.payload || savingToEdc || state.edcSaved) return;
-  savingToEdc = true;
-  const button = els.sendCronos;
-  button.disabled = true;
-  button.classList.add("is-loading");
-  try {
-    // Every value that was located on the page travels with a crop of the mark it
-    // was read from, so the EDC keeps the source beside the datum.
-    const located = pageTargets(state.payload.form || {});
-    if (state.pdf && state.pdf.loaded) {
-      button.textContent = "Preparing the original page…";
-      await state.pdf.loaded;
-    }
-    button.textContent = located.length ? "Cutting source images…" : "Saving…";
-    if (located.length && (!state.pdf || !state.pdf.doc)) {
-      throw new Error(
-        "The original document isn't available, so source images couldn't be attached."
-      );
-    }
-    const crops = located.length
-      ? await state.pdf.cropRegions(located, { padding: 0, format: "image/jpeg", quality: 0.85 })
-      : {};
-    if (located.length && !Object.keys(crops).length) {
-      throw new Error("Source images couldn't be cut from the page. Try again.");
-    }
-
-    button.textContent = "Saving to the EDC…";
-    const result = await api(`/api/documents/${state.result.job_id}/visit/save`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        payload: {
-          header: state.payload.header,
-          form: state.payload.form,
-        },
-        crops,
-      }),
-    });
-
-    (result.warnings || []).forEach((warning) => inlineNotice(els.formSections, warning));
-    state.lastSave = result.counts || null;
-    markSavedToEdc();
-    if (result.unchanged) {
-      toast("Every value already matches the EDC — nothing was sent", "info", 4200);
-    } else {
-      const changed = (result.delta && result.delta.changes || []).length;
-      const skipped = (result.counts && result.counts.unchanged) || 0;
-      toast(`Saved ${changed} changed value${changed === 1 ? "" : "s"} to Cronos` +
-        (skipped ? ` · ${skipped} already matched` : ""));
-    }
-    els.extractedScroll.scrollTop = 0;
-    saveSessionNow();
-  } catch (error) {
-    if (state.edcSaved) return;
-    inlineNotice(els.formSections, error.message, "warn", {
-      label: "Try again",
-      onClick: saveToEdc,
-    });
-    els.extractedScroll.scrollTop = 0;
-    button.classList.remove("is-loading");
-    button.textContent = "Save to EDC";
-    button.disabled = false;
-  } finally {
-    if (!state.edcSaved) savingToEdc = false;
+/* One image per CRF page its values were read from — exactly what the old
+   one-click save attached. Used by the signed submit in edc.js.
+   `onStage(text)` reports progress for the button that is waiting. */
+async function cutCrops(onStage = () => {}) {
+  if (!state.payload) return {};
+  const located = pageTargets(state.payload.form || {});
+  if (!located.length) return {};
+  if (state.pdf && state.pdf.loaded) {
+    onStage("Preparing the original page…");
+    await state.pdf.loaded;
   }
+  if (!state.pdf || !state.pdf.doc) {
+    throw new Error(
+      "The original document isn't available, so source images couldn't be attached."
+    );
+  }
+  onStage("Cutting source images…");
+  const crops = await state.pdf.cropRegions(located, {
+    padding: 0, format: "image/jpeg", quality: 0.85,
+  });
+  if (!Object.keys(crops).length) {
+    throw new Error("Source images couldn't be cut from the page. Try again.");
+  }
+  return crops;
+}
+
+/* Submitting goes through pre-flight and an e-signature (edc.js). */
+function saveToEdc() {
+  if (!state.payload || savingToEdc) return;
+  const layer = edc();
+  if (layer && layer.openSubmit) {
+    layer.openSubmit();
+    return;
+  }
+  toast("Submitting isn't available right now. Reload the page and try again.", "error", 4200);
 }
 
 /* ------------------------------------------------------------------- wiring */
@@ -2822,7 +3068,7 @@ async function download(kind) {
       if (!response.ok) throw new Error("We couldn't build the Word file.");
       saveBlob(await response.blob(), `${name}.docx`);
     } catch (err) {
-      alert(err.message);
+      toast(err.message, "error", 4200);
     } finally {
       els.downloadBtn.innerHTML = label;
       els.downloadBtn.disabled = false;
@@ -2947,11 +3193,42 @@ function hideLogin() {
   els.loginPassword.value = "";
 }
 
-function showSignedIn(username) {
-  state.username = username;
-  els.userName.textContent = username;
+function showSignedIn(user) {
+  state.username = user.username;
+  state.user = {
+    username: user.username,
+    full_name: user.full_name || user.username,
+    role: user.role || "reviewer",
+  };
+  els.userName.textContent = state.user.full_name;
+  els.userName.title = `${state.user.username} · ${state.user.role}`;
   els.userChip.classList.remove("hidden");
   hideLogin();
+}
+
+/* Review.open() can be called by the shell's router before the session is
+   known; it waits here until a reviewer is signed in and the app session
+   (modes, reader, mapping) is loaded. */
+let sessionReady = false;
+let signedInResolve = null;
+let signedInPromise = null;
+function whenSignedIn() {
+  if (sessionReady) return Promise.resolve();
+  if (!signedInPromise) {
+    signedInPromise = new Promise((resolve) => { signedInResolve = resolve; });
+  }
+  return signedInPromise;
+}
+function markSignedIn() {
+  sessionReady = true;
+  if (signedInResolve) signedInResolve();
+  signedInResolve = null;
+  signedInPromise = null;
+}
+
+function announceSignedOut() {
+  sessionReady = false;
+  window.dispatchEvent(new CustomEvent("wh:signed-out"));
 }
 
 async function loadAppSession() {
@@ -2981,13 +3258,18 @@ async function loadAppSession() {
   return session;
 }
 
-async function afterSignIn(username) {
-  showSignedIn(username);
+async function afterSignIn(user) {
+  showSignedIn(user);
   await loadAppSession();
+  window.dispatchEvent(new CustomEvent("wh:signed-in", { detail: { ...state.user } }));
+  markSignedIn();
   await renderRecentMenu();
   let restored = false;
+  // Inside the app shell the router decides what opens; picking the last
+  // local review back up would cover whatever the address asked for.
+  const shell = Boolean(window.WH && window.WH.router);
   try {
-    restored = await restoreSession();
+    if (!shell && !state.result) restored = await restoreSession();
   } catch (error) {
     console.warn("no session restored", error);
   }
@@ -2998,8 +3280,12 @@ async function afterSignIn(username) {
 }
 
 onUnauthorized = () => {
+  const was = state.username;
   state.username = null;
+  state.user = null;
+  sessionReady = false;
   showLogin("Your session ended. Please sign in again.");
+  if (was) announceSignedOut();
 };
 
 els.loginForm.addEventListener("submit", async (event) => {
@@ -3015,10 +3301,19 @@ els.loginForm.addEventListener("submit", async (event) => {
         password: els.loginPassword.value,
       }),
     });
-    await afterSignIn(data.username);
+    await afterSignIn(data);
   } catch (error) {
-    els.loginError.textContent = error.message || "Incorrect username or password.";
+    // 423: the account is locked; the detail says until when.
+    els.loginError.textContent = error.status === 423
+      ? error.message || "This account is locked. Try again later or ask an administrator."
+      : error.status === 401
+        ? error.message || "Incorrect username or password."
+        : error.message || "We couldn't sign you in. Please try again.";
+    els.loginError.classList.toggle("is-locked", error.status === 423);
     els.loginError.classList.remove("hidden");
+    if (error.status !== 423) {
+      els.loginPassword.select();
+    }
   } finally {
     els.loginSubmit.disabled = false;
   }
@@ -3030,14 +3325,20 @@ els.logoutBtn.addEventListener("click", async () => {
   } catch {
     /* still clear the local UI */
   }
+  if (edc() && edc().flush) edc().flush();
   await clearCurrentPointer();
   wireTabLease(null);
   state.username = null;
+  state.user = null;
   state.result = null;
+  openToken = null;
+  hideOpenSkeleton();
   resetMapping();
+  resetReviewIdentity();
   document.body.classList.remove("viewing");
   els.viewer.classList.add("hidden");
   showLogin();
+  announceSignedOut();
 });
 
 els.recentBtn.addEventListener("click", async (event) => {
@@ -3051,18 +3352,283 @@ document.addEventListener("click", () => {
   if (els.recentMenu) els.recentMenu.classList.add("hidden");
 });
 
+/* ==========================================================================
+   Review entry points — the app shell drives the screen through these.
+
+   Review.open(docId) opens a review the server holds. GET /docs/{id}/review
+   answers in the same shape the IndexedDB snapshot is saved in, so it lands
+   exactly like a restored session; the PDF comes from /docs/{id}/file so
+   the original pane, its boxes and the submit crops behave as for an upload.
+   ========================================================================== */
+
+let openToken = null;
+let openPromise = null;
+let openingId = null;
+
+function hideOpenSkeleton() {
+  const node = document.getElementById("rv-open");
+  if (node) node.remove();
+  els.viewer.classList.remove("is-opening");
+}
+
+function showOpenSkeleton() {
+  hideOpenSkeleton();
+  els.viewer.classList.add("is-opening");
+  els.resultTitle.textContent = "Opening review…";
+  els.resultChips.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.id = "rv-open";
+  wrap.className = "rv-open";
+  wrap.setAttribute("role", "status");
+  wrap.setAttribute("aria-live", "polite");
+  const sr = document.createElement("span");
+  sr.className = "rv-sr";
+  sr.textContent = "Opening the review…";
+  const left = document.createElement("div");
+  left.className = "rv-open-pane rv-open-original";
+  const page = document.createElement("div");
+  page.className = "rv-sk-page";
+  ["w-40 h-lg", "w-90", "w-80", "w-85", "block", "w-70", "w-88", "w-60"].forEach((cls) => {
+    const line = document.createElement("span");
+    line.className = `rv-sk ${cls}`;
+    page.appendChild(line);
+  });
+  left.appendChild(page);
+  const right = document.createElement("div");
+  right.className = "rv-open-pane rv-open-form";
+  ["rail", "title", "row", "row w-80", "row", "row w-60", "row", "row w-80"].forEach((cls) => {
+    const line = document.createElement("span");
+    line.className = `rv-sk rv-sk-${cls.split(" ")[0]} ${cls.split(" ")[1] || ""}`.trim();
+    right.appendChild(line);
+  });
+  wrap.append(sr, left, right);
+  els.stage.appendChild(wrap);
+}
+
+function showOpenError(error, retry) {
+  const wrap = document.getElementById("rv-open");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  wrap.classList.add("is-error");
+  const card = document.createElement("div");
+  card.className = "rv-open-error";
+  const node = statusNode({
+    kind: error.status === 403 ? "warn" : "error",
+    title: error.status === 404
+      ? "This review couldn't be found"
+      : error.status === 403
+        ? "You don't have access to this review"
+        : "The review didn't open",
+    detail: error.message,
+  });
+  const actions = document.createElement("div");
+  actions.className = "rv-open-actions";
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "btn btn-quiet";
+  back.textContent = "Back";
+  back.addEventListener("click", () => {
+    closeViewer();
+    if (window.WH && window.WH.router && history.length > 1) history.back();
+  });
+  actions.appendChild(back);
+  if (error.status !== 404 && error.status !== 403) {
+    const again = document.createElement("button");
+    again.type = "button";
+    again.className = "btn btn-primary";
+    again.textContent = "Try again";
+    again.addEventListener("click", retry);
+    actions.appendChild(again);
+  }
+  card.append(node, actions);
+  wrap.appendChild(card);
+  els.resultTitle.textContent = "Review not opened";
+}
+
+function openReview(docId) {
+  const id = String(docId == null ? "" : docId).trim();
+  if (!id) return Promise.resolve(false);
+  if (openToken && openingId === id && openPromise) return openPromise;
+  openPromise = openReviewInner(id).finally(() => {
+    if (openingId === id) {
+      openPromise = null;
+      openingId = null;
+    }
+  });
+  openingId = id;
+  return openPromise;
+}
+
+async function openReviewInner(id) {
+  await whenSignedIn();
+  // Already on screen (the upload that just set the address, or a second
+  // click on the same row): nothing to fetch.
+  if (state.docId === id && state.result && !openToken
+      && !els.viewer.classList.contains("hidden")) {
+    return true;
+  }
+  const layer = edc();
+  if (layer && layer.flush) layer.flush();
+
+  const token = {};
+  openToken = token;
+  if (state.pdf) {
+    state.pdf.destroy();
+    state.pdf = null;
+  }
+  stopProcessing();
+  resetMapping();
+  resetReviewIdentity();
+  state.result = null;
+  state.file = null;
+  state.fileBytes = null;
+  state.bytesDropped = false;
+  wireTabLease(null);
+  els.viewer.classList.remove("hidden");
+  document.body.classList.add("viewing");
+  showOpenSkeleton();
+
+  try {
+    const enc = encodeURIComponent(id);
+    const [snap, bytes] = await Promise.all([
+      api(`/api/docs/${enc}/review`),
+      fetch(`/api/docs/${enc}/file`, { credentials: "same-origin" })
+        .then((response) => (response.ok ? response.arrayBuffer() : null))
+        .catch(() => null),
+    ]);
+    if (openToken !== token) return false;
+    applyReviewSnapshot(id, snap, bytes);
+    openToken = null;
+    hideOpenSkeleton();
+    return true;
+  } catch (error) {
+    if (openToken !== token) return false;
+    openToken = null;
+    if (error.status === 401) {
+      hideOpenSkeleton();
+      return false;
+    }
+    showOpenError(error, () => openReview(id));
+    return false;
+  }
+}
+
+function applyReviewSnapshot(id, snap, bytes) {
+  const doc = snap.document || {};
+  state.docId = id;
+  state.extractionId = snap.extraction_id != null
+    ? snap.extraction_id
+    : (doc.extraction && doc.extraction.id) || null;
+  state.serverReadOnly = Boolean(snap.readonly);
+  state.submitted = snap.submitted || null;
+  state.fileBytes = bytes || null;
+  state.savedName = (snap.result && snap.result.filename) || doc.filename || null;
+  state.startedAt = Date.now();
+  if (snap.reader) state.reader = { ...(state.reader || {}), ...snap.reader };
+
+  const result = { ...(snap.result || {}) };
+  if (!result.job_id) result.job_id = snap.job_id;
+  if (!result.filename) result.filename = doc.filename || "Document";
+
+  state.header = snap.header || null;
+  const visit = snap.visit || null;
+  if (visit && visit.form) {
+    state.visit = visit.form;
+    state.unsaveable = visit.unsaveable || [];
+  } else {
+    state.visit = visit;
+    state.unsaveable = [];
+  }
+  state.payload = snap.payload || null;
+  state.edits = Array.isArray(snap.edits) ? snap.edits : [];
+  state.draftRevision = (snap.draft && snap.draft.revision) || doc.draft_revision || 0;
+  state.signature = snap.signature || null;
+  state.sentKeys = [];
+  state.edcSaved = false;
+
+  const landing = state.payload ? "form" : "header";
+  showResult(result, landing, { preserveMapping: true, deferStep: true });
+  if (!state.fileBytes) {
+    els.originalEmpty.textContent =
+      "The original file couldn't be loaded from the server. The values can still be " +
+      "reviewed; boxes and source images need the page.";
+  }
+  wireTabLease(result.job_id);
+  // Applies the server's read-only flag even where BroadcastChannel is absent.
+  setReadOnly(state.readOnly);
+
+  enableStep("header");
+  if (state.header) {
+    renderHeader(state.header);
+    enableStep("form");
+  }
+  if (state.payload) {
+    renderForm(state.payload);
+    els.formPicker.classList.add("hidden");
+    els.formBody.classList.remove("hidden");
+    const located = collectHighlights(state.payload.form)
+      .some((item) => PLACED_ON_PAGE.has(item.match));
+    if (!located && state.pdf && !state.readOnly) {
+      flowStart("Placing boxes on the page…");
+      refineBoxes(prefetchPageImages());
+    }
+  }
+  setStep(landing);
+  els.extractedScroll.scrollTop = 0;
+  if (!state.header && state.mappingReady && !state.readOnly) loadHeader();
+
+  const layer = edc();
+  if (layer && layer.reviewLoaded) {
+    layer.reviewLoaded({ source: "server", draft: snap.draft || null, submitted: snap.submitted || null });
+  }
+  saveSessionNow();
+}
+
+function newUpload() {
+  if (state.result || !els.viewer.classList.contains("hidden")) {
+    closeViewer();
+  } else {
+    resetMapping();
+    resetReviewIdentity();
+  }
+  hideError();
+  els.fileInput.value = "";
+  setFile(null);
+  updateRunBar();
+}
+
+window.Review = {
+  open: openReview,
+  newUpload,
+  hasUnsavedChanges: () => {
+    const layer = edc();
+    return Boolean(layer && layer.hasUnsavedChanges && layer.hasUnsavedChanges());
+  },
+  get docId() { return state.docId; },
+};
+
+/* What edc.js builds on. One object, so the dependency is visible. */
+window.ReviewCore = {
+  state, els, api, toast, statusNode, inlineNotice, buttonBusy, buttonDone,
+  selectField, rowFor, fieldByKey, allFields, rerenderField, refreshMetaFor,
+  useAlternateRead, cutCrops, markSavedToEdc, resetSubmitButton,
+  saveSession, saveSessionNow, cssEscape, formatDate, openReview,
+  STATUS_ICONS, ISSUE_TEXT, READING_ISSUES, CHECK_ISSUES, HARD_ISSUES,
+};
+
 /* -------------------------------------------------------------------- boot */
 
 (async function boot() {
   setZoom(1);
+  resetSubmitButton();
   wireMapping();
   wireSplitter();
   document.body.classList.add("signed-out");
 
   try {
-    const me = await api("/api/me");
+    const me = await api("/api/me", { quiet401: true });
     document.body.classList.remove("booting");
-    await afterSignIn(me.username);
+    await afterSignIn(me);
   } catch {
     showLogin();
   }

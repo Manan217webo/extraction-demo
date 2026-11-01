@@ -177,7 +177,9 @@ async def classify(session: AsyncSession, source_id: str, path: str,
 def doc_dict(document: db.Document, extraction: Optional[db.Extraction] = None,
              draft_revision: Optional[int] = None) -> dict[str, Any]:
     return {
-        "id": document.id, "filename": document.filename, "path": document.path,
+        "id": document.id, "filename": document.filename,
+        # An upload's "path" is its content hash — not something to show a person.
+        "path": None if document.source_id == UPLOAD_SOURCE else document.path,
         "source_id": document.source_id, "status": document.status,
         "protocol_no": document.protocol_no, "screening_no": document.screening_no,
         "visit_name": document.visit_name, "flags": document.flags,

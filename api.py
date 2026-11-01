@@ -403,7 +403,9 @@ async def list_docs(request: Request, status: Optional[str] = None, q: Optional[
         filters.append(db.Document.protocol_no == protocol)
     if subject:
         filters.append(db.Document.screening_no == subject)
-    if assignee:
+    if assignee == "none":
+        filters.append(db.Document.assignee.is_(None))
+    elif assignee:
         filters.append(db.Document.assignee == assignee)
     if flagged:
         filters.append(db.Document.flags > 0)
@@ -460,7 +462,9 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
-        if extraction.status in ("queued", "running") and not (extraction.snapshot or {}).get("header"):
+        # A batch run is still being read on the server; an upload's run is
+        # driven from the browser, so it can be opened (and finished) at any step.
+        if extraction.batch_id and extraction.status in ("queued", "running"):
             raise HTTPException(409, "This document is still being read. It will be ready shortly.")
         draft = await esource.latest_draft(session, document.id, extraction.id)
         submission = (await session.execute(

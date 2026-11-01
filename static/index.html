@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Document Extraction — Webo Healthtech</title>
+    <title>eSource — Webo Healthtech</title>
     <link rel="icon" href="/static/brand/whpl-logo.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -12,16 +12,59 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/css/shell.css" />
+    <link rel="stylesheet" href="/static/css/review.css" />
+    <script>
+      /* Theme and density before first paint, so a dark-mode reader never sees a
+         white flash. Storage can throw (private mode); fall back to the system. */
+      (function () {
+        var root = document.documentElement, theme = null, density = null;
+        try {
+          theme = JSON.parse(localStorage.getItem("wh.theme"));
+          density = JSON.parse(localStorage.getItem("wh.density"));
+        } catch (e) {}
+        if (theme !== "light" && theme !== "dark") {
+          theme = window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        root.setAttribute("data-theme", theme);
+        root.setAttribute("data-density", density === "compact" ? "compact" : "comfortable");
+      })();
+    </script>
+    <!-- App shell (classic deferred scripts on window.WH; run after app.js). -->
+    <script defer src="/static/js/core.js"></script>
+    <script defer src="/static/js/components.js"></script>
+    <script defer src="/static/js/router.js"></script>
+    <script defer src="/static/js/shell.js"></script>
+    <script defer src="/static/js/palette.js"></script>
+    <script defer src="/static/js/inbox.js"></script>
+    <script defer src="/static/js/sources.js"></script>
+    <script defer src="/static/js/batches.js"></script>
+    <script defer src="/static/js/history.js"></script>
+    <script defer src="/static/js/audit.js"></script>
+    <script defer src="/static/js/admin.js"></script>
   </head>
   <body class="booting">
+    <a class="wh-skip" id="skip-link" href="#screen">Skip to content</a>
+    <div id="wh-announcer" class="wh-sr" aria-live="polite" aria-atomic="true"></div>
+    <div id="wh-offline" class="wh-offline" role="status" aria-live="polite" hidden></div>
+
     <header class="topbar">
+      <button type="button" class="wh-icon-btn wh-nav-toggle" id="nav-toggle" aria-controls="sidenav" aria-expanded="false" aria-label="Open navigation"></button>
       <div class="brand">
         <img src="/static/brand/whpl-logo.png" alt="Webo Healthtech" />
         <span class="divider" aria-hidden="true"></span>
-        <span class="product">Document Extraction</span>
+        <span class="product">eSource</span>
       </div>
 
+      <nav class="wh-crumbs" id="crumbs" aria-label="Breadcrumb"><ol id="crumbs-list"></ol></nav>
+
       <div class="topbar-right">
+        <button type="button" class="wh-cmdk-btn" id="cmdk-btn" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K">
+          <span class="wh-cmdk-icon" aria-hidden="true"></span>
+          <span class="wh-cmdk-text">Search or jump to…</span>
+          <kbd class="wh-kbd" id="cmdk-kbd">Ctrl K</kbd>
+        </button>
+        <button type="button" class="wh-icon-btn" id="theme-btn" aria-label="Switch to dark theme" title="Switch theme"></button>
         <div class="menu-wrap" id="recent-wrap">
           <button type="button" class="btn btn-quiet hidden" id="recent-btn" aria-haspopup="true" aria-expanded="false">
             Recent reviews
@@ -72,314 +115,338 @@
       </form>
     </div>
 
-    <div id="tab-banner" class="tab-banner hidden" role="status">
-      This review is open in another tab. Editing is paused here so the two tabs do not overwrite each other.
-    </div>
-
-    <main class="workspace" id="workspace">
-      <section class="intro">
-        <p class="eyebrow">Source document processing</p>
-        <p class="lede">
-          Upload a document and review the extracted content side by side with the
-          original page before you use it. Every document is read at Maximum Accuracy.
-        </p>
-      </section>
-
-      <div id="setup-error" class="notice notice-warn hidden"></div>
-
-      <ol class="steps">
-        <li class="card step" id="step-1">
-          <div class="step-head">
-            <span class="step-num">1</span>
-            <div>
-              <h2>Add your document</h2>
-              <p>PDF files up to <span id="max-mb">50</span> MB. Your file stays on this server.</p>
-            </div>
-          </div>
-
-          <label id="dropzone" class="dropzone" for="file-input">
-            <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
-            <span class="drop-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
-                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-                <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-                <path d="M12 17v-5m0 0-2 2m2-2 2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <span class="drop-copy">
-              <strong>Drop a PDF here, or browse</strong>
-              <span>Scanned pages, forms and tables are all supported</span>
-            </span>
-          </label>
-
-          <div id="file-card" class="file-card hidden">
-            <span class="file-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
-                <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-                <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-              </svg>
-            </span>
-            <div class="file-meta">
-              <strong id="file-name"></strong>
-              <span id="file-detail"></span>
-            </div>
-            <button type="button" id="clear-file" class="link-btn">Replace</button>
-          </div>
-        </li>
-
-        <li class="card step step-run" id="step-2">
-          <div class="run-summary">
-            <div class="run-line">
-              <span class="run-label">Document</span>
-              <strong id="run-file">No file selected</strong>
-            </div>
-            <div class="run-line">
-              <span class="run-label">Reading mode</span>
-              <strong id="run-mode">Maximum Accuracy</strong>
-            </div>
-            <div class="run-line">
-              <span class="run-label">Estimated cost</span>
-              <strong id="run-cost">—</strong>
-            </div>
-          </div>
-          <button id="run-btn" type="button" class="btn btn-primary btn-lg" disabled>
-            Extract document
-          </button>
-        </li>
-      </ol>
-
-      <div id="error-card" class="notice notice-error hidden">
-        <div>
-          <strong>Extraction didn't finish</strong>
-          <p id="error-copy"></p>
+    <div class="wh-app" id="app-shell">
+      <nav class="wh-sidenav" id="sidenav" aria-label="Main">
+        <ul class="wh-nav-list">
+          <li><a class="wh-nav-link" href="#/inbox" data-nav="inbox"><span class="wh-nav-icon" data-icon="inbox"></span><span class="wh-nav-label">Inbox</span><span class="wh-nav-badge" id="badge-inbox" hidden></span></a></li>
+          <li data-feature="sources"><a class="wh-nav-link" href="#/sources" data-nav="sources"><span class="wh-nav-icon" data-icon="folder"></span><span class="wh-nav-label">Sources</span></a></li>
+          <li><a class="wh-nav-link" href="#/batches" data-nav="batches"><span class="wh-nav-icon" data-icon="layers"></span><span class="wh-nav-label">Batches</span><span class="wh-nav-badge wh-nav-badge--live" id="badge-batches" hidden></span></a></li>
+          <li><a class="wh-nav-link" href="#/audit" data-nav="audit"><span class="wh-nav-icon" data-icon="shield"></span><span class="wh-nav-label">Audit</span></a></li>
+          <li data-role="admin" hidden><a class="wh-nav-link" href="#/admin" data-nav="admin"><span class="wh-nav-icon" data-icon="users"></span><span class="wh-nav-label">Admin</span></a></li>
+        </ul>
+        <div class="wh-nav-foot">
+          <a class="wh-nav-link wh-nav-upload" href="#/upload" data-nav="upload" data-write><span class="wh-nav-icon" data-icon="upload"></span><span class="wh-nav-label">Upload a PDF</span></a>
+          <button type="button" class="wh-nav-link wh-nav-collapse" id="nav-collapse" aria-pressed="false"><span class="wh-nav-icon" data-icon="panel-left"></span><span class="wh-nav-label">Collapse sidebar</span></button>
         </div>
-        <button type="button" id="error-retry" class="btn btn-quiet">Try again</button>
-      </div>
-    </main>
+      </nav>
+      <div class="wh-nav-scrim" id="nav-scrim" hidden></div>
 
-    <!-- ------------------------------------------------------------ processing -->
-    <div id="processing" class="processing hidden" role="status" aria-live="polite">
-      <div class="processing-inner">
-        <div class="processing-head">
-          <div class="ring-wrap">
-            <svg class="spin-ring" viewBox="0 0 60 60" aria-hidden="true">
-              <circle class="spin-track" cx="30" cy="30" r="26" />
-              <circle class="spin-arc" cx="30" cy="30" r="26" />
-            </svg>
-            <span class="ring-time" id="elapsed">0:00</span>
-            <svg class="ring-done" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </div>
-          <div class="processing-copy">
-            <h2 id="processing-title">Reading your document</h2>
-            <p id="processing-file"></p>
-          </div>
+      <div class="wh-main" id="main">
+        <div id="screen" class="wh-screen" role="main" tabindex="-1" aria-label="Main content" hidden></div>
+
+        <!-- Review screen (owned by app.js): upload landing, processing and viewer. -->
+        <div id="review-root" class="wh-review-root" hidden>
+        <div id="tab-banner" class="tab-banner hidden" role="status">
+          This review is open in another tab. Editing is paused here so the two tabs do not overwrite each other.
         </div>
 
-        <ol class="stages" id="stages">
-          <li data-stage="upload"><span class="stage-dot"></span><span>Uploading document</span></li>
-          <li data-stage="queue"><span class="stage-dot"></span><span>Waiting for a reader</span></li>
-          <li data-stage="read"><span class="stage-dot"></span><span>Reading pages and rebuilding tables</span></li>
-          <li data-stage="finish"><span class="stage-dot"></span><span>Preparing your document</span></li>
-          <li data-stage="fields"><span class="stage-dot"></span><span>Matching the document header</span></li>
-        </ol>
+        <main class="workspace" id="workspace">
+          <section class="intro">
+            <p class="eyebrow">Source document processing</p>
+            <p class="lede">
+              Upload a document and review the extracted content side by side with the
+              original page before you use it. Every document is read at Maximum Accuracy.
+            </p>
+          </section>
 
-        <div class="skeleton" aria-hidden="true">
-          <div class="sk-page">
-            <span class="sk-line w-40 h-lg"></span>
-            <span class="sk-line w-90"></span>
-            <span class="sk-line w-80"></span>
-            <span class="sk-line w-85"></span>
-            <span class="sk-block"></span>
-            <span class="sk-line w-70"></span>
-            <span class="sk-line w-88"></span>
-          </div>
-        </div>
+          <div id="setup-error" class="notice notice-warn hidden"></div>
 
-        <p class="processing-foot" id="processing-foot"></p>
-      </div>
-    </div>
+          <ol class="steps">
+            <li class="card step" id="step-1">
+              <div class="step-head">
+                <span class="step-num">1</span>
+                <div>
+                  <h2>Add your document</h2>
+                  <p>PDF files up to <span id="max-mb">50</span> MB. Your file stays on this server.</p>
+                </div>
+              </div>
 
-    <!-- ---------------------------------------------------------------- viewer -->
-    <section id="viewer" class="viewer hidden" aria-label="Extracted document">
-      <header class="viewer-bar">
-        <div class="vb-row vb-top">
-          <button type="button" id="viewer-back" class="btn btn-quiet btn-back">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
-              <path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            New document
-          </button>
+              <label id="dropzone" class="dropzone" for="file-input">
+                <input id="file-input" type="file" accept="application/pdf,.pdf" hidden />
+                <span class="drop-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                    <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                    <path d="M12 17v-5m0 0-2 2m2-2 2 2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </span>
+                <span class="drop-copy">
+                  <strong>Drop a PDF here, or browse</strong>
+                  <span>Scanned pages, forms and tables are all supported</span>
+                </span>
+              </label>
 
-          <div class="vb-title">
-            <h2 id="result-title">Extracted document</h2>
-            <div class="chips" id="result-chips"></div>
-          </div>
+              <div id="file-card" class="file-card hidden">
+                <span class="file-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+                    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                    <path d="M14 3v5h5" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                  </svg>
+                </span>
+                <div class="file-meta">
+                  <strong id="file-name"></strong>
+                  <span id="file-detail"></span>
+                </div>
+                <button type="button" id="clear-file" class="link-btn">Replace</button>
+              </div>
+            </li>
 
-          <div class="vb-actions" id="vb-actions">
-            <button type="button" class="btn btn-quiet hidden" id="copy-btn">Copy text</button>
-            <div class="menu-wrap hidden">
-              <button type="button" class="btn btn-quiet" id="download-btn">
-                Download
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
-                  <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
+            <li class="card step step-run" id="step-2">
+              <div class="run-summary">
+                <div class="run-line">
+                  <span class="run-label">Document</span>
+                  <strong id="run-file">No file selected</strong>
+                </div>
+                <div class="run-line">
+                  <span class="run-label">Reading mode</span>
+                  <strong id="run-mode">Maximum Accuracy</strong>
+                </div>
+                <div class="run-line">
+                  <span class="run-label">Estimated cost</span>
+                  <strong id="run-cost">—</strong>
+                </div>
+              </div>
+              <button id="run-btn" type="button" class="btn btn-primary btn-lg" disabled>
+                Extract document
               </button>
-              <div class="menu hidden" id="download-menu">
-                <button type="button" data-dl="word"><b>Word document</b><span>.docx — ready to edit</span></button>
-                <button type="button" data-dl="text"><b>Plain text</b><span>.txt — words only</span></button>
-                <button type="button" data-dl="markdown"><b>Markdown</b><span>.md — keeps structure</span></button>
-                <button type="button" data-dl="print"><b>Print or save as PDF</b><span>Opens your print dialog</span></button>
+            </li>
+          </ol>
+
+          <div id="error-card" class="notice notice-error hidden">
+            <div>
+              <strong>Extraction didn't finish</strong>
+              <p id="error-copy"></p>
+            </div>
+            <button type="button" id="error-retry" class="btn btn-quiet">Try again</button>
+          </div>
+        </main>
+
+        <!-- ------------------------------------------------------------ processing -->
+        <div id="processing" class="processing hidden" role="status" aria-live="polite">
+          <div class="processing-inner">
+            <div class="processing-head">
+              <div class="ring-wrap">
+                <svg class="spin-ring" viewBox="0 0 60 60" aria-hidden="true">
+                  <circle class="spin-track" cx="30" cy="30" r="26" />
+                  <circle class="spin-arc" cx="30" cy="30" r="26" />
+                </svg>
+                <span class="ring-time" id="elapsed">0:00</span>
+                <svg class="ring-done" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M5 12.5l4.5 4.5L19 7.5" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </div>
+              <div class="processing-copy">
+                <h2 id="processing-title">Reading your document</h2>
+                <p id="processing-file"></p>
               </div>
             </div>
+
+            <ol class="stages" id="stages">
+              <li data-stage="upload"><span class="stage-dot"></span><span>Uploading document</span></li>
+              <li data-stage="queue"><span class="stage-dot"></span><span>Waiting for a reader</span></li>
+              <li data-stage="read"><span class="stage-dot"></span><span>Reading pages and rebuilding tables</span></li>
+              <li data-stage="finish"><span class="stage-dot"></span><span>Preparing your document</span></li>
+              <li data-stage="fields"><span class="stage-dot"></span><span>Matching the document header</span></li>
+            </ol>
+
+            <div class="skeleton" aria-hidden="true">
+              <div class="sk-page">
+                <span class="sk-line w-40 h-lg"></span>
+                <span class="sk-line w-90"></span>
+                <span class="sk-line w-80"></span>
+                <span class="sk-line w-85"></span>
+                <span class="sk-block"></span>
+                <span class="sk-line w-70"></span>
+                <span class="sk-line w-88"></span>
+              </div>
+            </div>
+
+            <p class="processing-foot" id="processing-foot"></p>
           </div>
         </div>
 
-        <nav class="stepper" id="stepper" aria-label="Progress">
-          <button type="button" data-step="header" class="active" disabled>
-            <b>1</b><span>Confirm header</span>
-          </button>
-          <button type="button" data-step="form" disabled>
-            <b>2</b><span>Map to Cronos CRF</span>
-          </button>
-        </nav>
+        <!-- ---------------------------------------------------------------- viewer -->
+        <section id="viewer" class="viewer hidden" aria-label="Extracted document">
+          <header class="viewer-bar">
+            <div class="vb-row vb-top">
+              <button type="button" id="viewer-back" class="btn btn-quiet btn-back">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
+                  <path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                New document
+              </button>
 
-        <div class="vb-row vb-tools hidden" id="tools-extract">
-          <div class="segmented" id="layout-toggle" role="group" aria-label="Layout">
-            <button type="button" data-layout="split" class="active">Side by side</button>
-            <button type="button" data-layout="extracted">Extracted only</button>
-            <button type="button" data-layout="original">Original only</button>
-          </div>
+              <div class="vb-title">
+                <h2 id="result-title">Extracted document</h2>
+                <div class="chips" id="result-chips"></div>
+              </div>
 
-          <div class="segmented" id="format-toggle" role="group" aria-label="Text format">
-            <button type="button" data-format="formatted" class="active">Formatted</button>
-            <button type="button" data-format="markdown">Markdown</button>
-            <button type="button" data-format="plain">Plain text</button>
-          </div>
+              <div class="vb-actions" id="vb-actions">
+                <button type="button" class="btn btn-quiet hidden" id="copy-btn">Copy text</button>
+                <div class="menu-wrap hidden">
+                  <button type="button" class="btn btn-quiet" id="download-btn">
+                    Download
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true">
+                      <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                  <div class="menu hidden" id="download-menu">
+                    <button type="button" data-dl="word"><b>Word document</b><span>.docx — ready to edit</span></button>
+                    <button type="button" data-dl="text"><b>Plain text</b><span>.txt — words only</span></button>
+                    <button type="button" data-dl="markdown"><b>Markdown</b><span>.md — keeps structure</span></button>
+                    <button type="button" data-dl="print"><b>Print or save as PDF</b><span>Opens your print dialog</span></button>
+                  </div>
+                </div>
+              </div>
+            </div>
 
-          <div class="search">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/>
-              <path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-            <input id="search-input" type="search" placeholder="Find in document" autocomplete="off" />
-            <span class="search-count" id="search-count"></span>
-            <button type="button" id="search-prev" class="icon-btn" title="Previous match" disabled>&#8593;</button>
-            <button type="button" id="search-next" class="icon-btn" title="Next match" disabled>&#8595;</button>
-          </div>
+            <nav class="stepper" id="stepper" aria-label="Progress">
+              <button type="button" data-step="header" class="active" disabled>
+                <b>1</b><span>Confirm header</span>
+              </button>
+              <button type="button" data-step="form" disabled>
+                <b>2</b><span>Map to Cronos CRF</span>
+              </button>
+            </nav>
 
-          <div class="zoom">
-            <button type="button" id="zoom-out" class="icon-btn" title="Smaller text">&minus;</button>
-            <span id="zoom-level">100%</span>
-            <button type="button" id="zoom-in" class="icon-btn" title="Larger text">+</button>
+            <div class="vb-row vb-tools hidden" id="tools-extract">
+              <div class="segmented" id="layout-toggle" role="group" aria-label="Layout">
+                <button type="button" data-layout="split" class="active">Side by side</button>
+                <button type="button" data-layout="extracted">Extracted only</button>
+                <button type="button" data-layout="original">Original only</button>
+              </div>
+
+              <div class="segmented" id="format-toggle" role="group" aria-label="Text format">
+                <button type="button" data-format="formatted" class="active">Formatted</button>
+                <button type="button" data-format="markdown">Markdown</button>
+                <button type="button" data-format="plain">Plain text</button>
+              </div>
+
+              <div class="search">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                  <circle cx="11" cy="11" r="6.5" stroke="currentColor" stroke-width="1.8"/>
+                  <path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+                <input id="search-input" type="search" placeholder="Find in document" autocomplete="off" />
+                <span class="search-count" id="search-count"></span>
+                <button type="button" id="search-prev" class="icon-btn" title="Previous match" disabled>&#8593;</button>
+                <button type="button" id="search-next" class="icon-btn" title="Next match" disabled>&#8595;</button>
+              </div>
+
+              <div class="zoom">
+                <button type="button" id="zoom-out" class="icon-btn" title="Smaller text">&minus;</button>
+                <span id="zoom-level">100%</span>
+                <button type="button" id="zoom-in" class="icon-btn" title="Larger text">+</button>
+              </div>
+            </div>
+          </header>
+
+          <div class="viewer-stage" id="viewer-stage" data-layout="split">
+            <section class="pane pane-original" id="pane-original">
+              <div class="pane-head">
+                <div class="pane-head-title">
+                  <span>Original document</span>
+                  <span id="pdf-accuracy" class="pdf-accuracy hidden"></span>
+                </div>
+                <label class="region-toggle" id="region-toggle-wrap" hidden>
+                  <input type="checkbox" id="region-toggle" checked />
+                  <span class="region-swatch" aria-hidden="true"></span>
+                  <span>Extracted regions</span>
+                  <b id="region-count"></b>
+                </label>
+              </div>
+              <div class="pane-body">
+                <div id="pdf-scroll" class="pdf-scroll"></div>
+                <div class="pane-empty" id="original-empty">
+                  The original file is no longer loaded in this browser session.
+                </div>
+              </div>
+            </section>
+
+            <div
+              class="pane-split"
+              id="pane-split"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize the panes"
+              tabindex="0"
+            ></div>
+
+            <section class="pane pane-extracted" id="pane-extracted">
+              <div class="pane-head">
+                <span id="extracted-heading">Extracted text</span>
+                <small id="extracted-note">Review before use</small>
+              </div>
+              <div class="pane-body" id="extracted-scroll">
+                <div id="panel-extract" class="panel">
+                  <div id="doc-formatted" class="doc-pages"></div>
+                  <pre id="doc-markdown" class="doc-source hidden"></pre>
+                  <pre id="doc-plain" class="doc-source hidden"></pre>
+                </div>
+
+                <!-- ------------------------------------------------ confirm header -->
+                <div id="panel-header" class="panel hidden">
+                  <div class="panel-intro">
+                    <p class="eyebrow">Step 1 of 2</p>
+                    <h3>Check what we read from the header</h3>
+                    <p>
+                      These identify the document. Correct anything that is wrong before the
+                      rest of the page is mapped &mdash; the values here are used to pick the
+                      right form and are carried into every record.
+                    </p>
+                  </div>
+                  <div id="header-groups"></div>
+                  <div class="panel-foot">
+                    <button type="button" class="btn btn-primary" id="header-confirm" disabled>
+                      Confirm and load the visit
+                    </button>
+                  </div>
+                </div>
+
+                <!-- --------------------------------------------------- map to cronos -->
+                <div id="panel-form" class="panel hidden">
+                  <div id="form-picker" class="picker">
+                    <div class="panel-intro">
+                      <p class="eyebrow">Step 2 of 2</p>
+                      <h3>The EDC needs the visit details</h3>
+                      <p id="picker-note">Looked up by protocol number, screening number and visit name.</p>
+                    </div>
+                    <div id="form-list" class="form-list"></div>
+                  </div>
+
+                  <div id="form-body" class="hidden">
+                    <div class="panel-intro">
+                      <p class="eyebrow" id="form-eyebrow">Cronos form</p>
+                      <h3 id="form-title"></h3>
+                      <p id="form-description"></p>
+                    </div>
+                    <div id="form-sections"></div>
+                    <div class="panel-foot panel-foot-wide">
+                      <div class="foot-spacer"></div>
+                      <button type="button" class="btn btn-quiet" id="dl-crf-json">
+                        Download JSON
+                      </button>
+                      <button type="button" class="btn btn-quiet" id="dl-crf-pdf">
+                        Download PDF
+                      </button>
+                      <button type="button" class="btn btn-primary" id="send-cronos">
+                        Save to EDC
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="panel-busy" class="panel-busy hidden">
+                  <span class="mini-spin" aria-hidden="true"></span>
+                  <p id="panel-busy-text">Reading fields…</p>
+                </div>
+              </div>
+            </section>
           </div>
+        </section>
         </div>
-      </header>
-
-      <div class="viewer-stage" id="viewer-stage" data-layout="split">
-        <section class="pane pane-original" id="pane-original">
-          <div class="pane-head">
-            <div class="pane-head-title">
-              <span>Original document</span>
-              <span id="pdf-accuracy" class="pdf-accuracy hidden"></span>
-            </div>
-            <label class="region-toggle" id="region-toggle-wrap" hidden>
-              <input type="checkbox" id="region-toggle" checked />
-              <span class="region-swatch" aria-hidden="true"></span>
-              <span>Extracted regions</span>
-              <b id="region-count"></b>
-            </label>
-          </div>
-          <div class="pane-body">
-            <div id="pdf-scroll" class="pdf-scroll"></div>
-            <div class="pane-empty" id="original-empty">
-              The original file is no longer loaded in this browser session.
-            </div>
-          </div>
-        </section>
-
-        <div
-          class="pane-split"
-          id="pane-split"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="Resize the panes"
-          tabindex="0"
-        ></div>
-
-        <section class="pane pane-extracted" id="pane-extracted">
-          <div class="pane-head">
-            <span id="extracted-heading">Extracted text</span>
-            <small id="extracted-note">Review before use</small>
-          </div>
-          <div class="pane-body" id="extracted-scroll">
-            <div id="panel-extract" class="panel">
-              <div id="doc-formatted" class="doc-pages"></div>
-              <pre id="doc-markdown" class="doc-source hidden"></pre>
-              <pre id="doc-plain" class="doc-source hidden"></pre>
-            </div>
-
-            <!-- ------------------------------------------------ confirm header -->
-            <div id="panel-header" class="panel hidden">
-              <div class="panel-intro">
-                <p class="eyebrow">Step 1 of 2</p>
-                <h3>Check what we read from the header</h3>
-                <p>
-                  These identify the document. Correct anything that is wrong before the
-                  rest of the page is mapped &mdash; the values here are used to pick the
-                  right form and are carried into every record.
-                </p>
-              </div>
-              <div id="header-groups"></div>
-              <div class="panel-foot">
-                <button type="button" class="btn btn-primary" id="header-confirm" disabled>
-                  Confirm and load the visit
-                </button>
-              </div>
-            </div>
-
-            <!-- --------------------------------------------------- map to cronos -->
-            <div id="panel-form" class="panel hidden">
-              <div id="form-picker" class="picker">
-                <div class="panel-intro">
-                  <p class="eyebrow">Step 2 of 2</p>
-                  <h3>The EDC needs the visit details</h3>
-                  <p id="picker-note">Looked up by protocol number, screening number and visit name.</p>
-                </div>
-                <div id="form-list" class="form-list"></div>
-              </div>
-
-              <div id="form-body" class="hidden">
-                <div class="panel-intro">
-                  <p class="eyebrow" id="form-eyebrow">Cronos form</p>
-                  <h3 id="form-title"></h3>
-                  <p id="form-description"></p>
-                </div>
-                <div id="form-sections"></div>
-                <div class="panel-foot panel-foot-wide">
-                  <div class="foot-spacer"></div>
-                  <button type="button" class="btn btn-quiet" id="dl-crf-json">
-                    Download JSON
-                  </button>
-                  <button type="button" class="btn btn-quiet" id="dl-crf-pdf">
-                    Download PDF
-                  </button>
-                  <button type="button" class="btn btn-primary" id="send-cronos">
-                    Save to EDC
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div id="panel-busy" class="panel-busy hidden">
-              <span class="mini-spin" aria-hidden="true"></span>
-              <p id="panel-busy-text">Reading fields…</p>
-            </div>
-          </div>
-        </section>
       </div>
-    </section>
+    </div>
 
     <script type="module">
       // pdf.js ships as an ES module; the rest of the app is classic script, so it
@@ -399,5 +466,6 @@
     <script src="/static/vendor/purify.min.js"></script>
     <script src="/static/pdfview.js"></script>
     <script src="/static/app.js"></script>
+    <script defer src="/static/js/edc.js"></script>
   </body>
 </html>
