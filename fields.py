@@ -713,9 +713,9 @@ async def extract_header(document: str,
     images = page_images(pages)
     # An image prompt takes longer to start answering than a page of text.
     timeout = max(HEADER_TIMEOUT, 60.0) if images else HEADER_TIMEOUT
-    second_model = second_read_model() if images else None
+    primary, second_model = read_models(bool(images))
     reads = [_complete(header_prompt(document, images), HEADER_SCHEMA, "crf_header",
-                       timeout=timeout, max_tokens=_header_tokens(model_name()))]
+                       model=primary, timeout=timeout, max_tokens=_header_tokens(primary))]
     if second_model:
         reads.append(_complete(header_prompt(document, images, with_boxes=False),
                                HEADER_SCHEMA_NO_BOX, "crf_header",
@@ -743,7 +743,7 @@ async def extract_header(document: str,
         else:
             second = rows_of(gathered[1])
             usages.append(gathered[1])
-    return {"values": reconcile(rows_of(gathered[0]), second),
+    return {"values": reconcile(rows_of(gathered[0]), second, prefer_second=False),
             "usage": _merge_usage(usages)}
 
 
@@ -862,6 +862,19 @@ def preferred_read() -> str:
     return "first"
 
 
+def read_models(with_images: bool = True) -> tuple[str, Optional[str]]:
+    """(primary, secondary) for a read. The primary is the bigger model.
+
+    The primary read is the one that also places boxes and whose value stands
+    when the two disagree; making it the bigger model means the value shown and
+    the box drawn come from the same, stronger read. The other read checks it.
+    """
+    first, second = model_name(), (second_read_model() if with_images else None)
+    if second and second != first and preferred_read() == "second":
+        return second, first
+    return first, second
+
+
 # Two reads that disagree, or a value the page shows was corrected, are where a
 # reviewer has to look — the score says so even if the model was sure.
 DISAGREE_CONFIDENCE = 0.4
@@ -967,8 +980,8 @@ def reconcile(first: list[dict[str, Any]],
 async def extract_form(document: str, form: dict[str, Any], header: dict[str, Any],
                        pages: Optional[dict[str, str]] = None) -> dict[str, Any]:
     images = page_images(pages)
-    second_model = second_read_model() if images else None
-    reads = [_extract_sections(document, form, header, images)]
+    primary, second_model = read_models(bool(images))
+    reads = [_extract_sections(document, form, header, images, model=primary)]
     if second_model:
         reads.append(_extract_sections(document, form, header, images, model=second_model,
                                        with_boxes=False))
@@ -988,12 +1001,13 @@ async def extract_form(document: str, form: dict[str, Any], header: dict[str, An
             second = _form_rows(gathered[1], form)["values"]
             usages.append(gathered[1])
 
-    values = reconcile(first["values"], second)
+    values = reconcile(first["values"], second, prefer_second=False)
     if second is not None:
         log.info("second read on %s: %s of %s value(s) disagree", second_model,
                  sum(1 for row in values if not row.get("agreed")), len(values))
     return {**first, "values": values, "images": len(images),
             "second_read": second_model if second is not None else None,
+            "primary_read": primary,
             "usage": _merge_usage(usages)}
 
 

@@ -7,3 +7,5 @@ uploads/
 debug_out/
 out/
 users.json
+data/
+sources.json

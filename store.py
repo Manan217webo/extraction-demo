@@ -112,10 +112,3 @@ async def lock(name: str, *, timeout: float = 300.0) -> AsyncIterator[Lock]:
         except Exception:
             # Lock may have already expired; never fail the request on release.
             pass
-
-
-async def audit_save(record: dict[str, Any]) -> None:
-    """Append a save audit row. Newest first; keep the last 1000."""
-    redis = get_redis()
-    await redis.lpush("audit:saves", json.dumps(record, ensure_ascii=False, default=str))
-    await redis.ltrim("audit:saves", 0, 999)

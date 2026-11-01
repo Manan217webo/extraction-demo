@@ -38,7 +38,13 @@ import llama_cloud
 from llama_cloud import AsyncLlamaCloud
 
 import anchors
+import api
+import audit
 import auth
+import db
+import edc_audit
+import esource
+import pipeline
 import cronos
 import edc
 import fields
@@ -71,6 +77,8 @@ API_BASE = (os.getenv("LLAMA_CLOUD_BASE_URL") or "https://api.cloud.llamaindex.a
 GENERIC_FAILURE = "We couldn't process this document. Please try again."
 
 PUBLIC_API_PATHS = {"/api/login", "/healthz"}
+# The only writes a read-only monitor makes: ending or keeping their own session.
+MONITOR_WRITES = {"/api/logout", "/api/session/ping"}
 
 # Who reads the page. "vision" (the default) renders the PDF to page images and
 # the field model reads those directly, with no parsing service in between.
@@ -184,8 +192,10 @@ def _production_guard() -> None:
         problems.append("EDC_FIXTURES must be unset in production")
     if not (os.getenv("REDIS_URL") or "").strip():
         problems.append("REDIS_URL must be set in production")
-    if not auth.load_users():
-        problems.append(f"USERS_FILE is empty — add reviewers with scripts/add_user.py ({auth.users_path()})")
+    if not db.database_url().startswith("postgresql"):
+        problems.append("DATABASE_URL must point at PostgreSQL in production")
+    if not (os.getenv("AUDIT_HMAC_KEY") or "").strip():
+        problems.append("AUDIT_HMAC_KEY must be set so the audit chain can't be recomputed")
     if not vision.configured():
         problems.append("Set OPENAI_VISION_MODEL or install Tesseract (TESSERACT_CMD)")
     if problems:
@@ -201,8 +211,20 @@ async def lifespan(_app: FastAPI):
         if auth.is_production():
             raise RuntimeError(f"Redis is unreachable at {store.redis_url()}")
         log.warning("Redis is unreachable at %s — login and job state will fail", store.redis_url())
+    await db.init()
+    await auth.import_legacy_users()
+    async with db.session() as session:
+        from sqlalchemy import select as _select
+        if (await session.execute(_select(db.User).limit(1))).scalar() is None:
+            log.warning("No accounts yet — create one with: uv run scripts/add_user.py "
+                        "<username> --role admin")
+    pipeline.start()
+    edc_audit.start()
     yield
+    await pipeline.stop()
+    await edc_audit.stop()
     await store.close()
+    await db.close()
 
 
 app = FastAPI(title="Webo Healthtech Document Extraction", lifespan=lifespan)
@@ -483,21 +505,34 @@ class _AuthMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
             token = request.cookies.get(auth.COOKIE_NAME)
+            # Background polling (GET) must not keep an idle session alive; a
+            # write or an explicit ping is the reviewer actually working.
+            touch = request.method != "GET"
             try:
-                username = await auth.user_from_token(store.get_redis(), token)
+                info = await auth.session_info(store.get_redis(), token, touch=touch)
             except Exception as exc:
                 log.warning("session lookup failed: %s", exc)
-                username = None
-            if not username:
+                info = None
+            user = await auth.get_user(info["u"]) if info else None
+            if not info or user is None or not user.active:
                 return JSONResponse(
-                    {"detail": "Please sign in to continue."},
+                    {"detail": "Your session has ended. Please sign in again."},
                     status_code=401,
                 )
-            request.state.user = username
+            if user.role == "monitor" and request.method not in ("GET", "HEAD") \
+                    and path not in MONITOR_WRITES and not path.endswith("/preflight"):
+                return JSONResponse(
+                    {"detail": "Your role can view records but not change them."},
+                    status_code=403,
+                )
+            request.state.user = user.username
+            request.state.role = user.role
+            request.state.expires_in = info["expires_in"]
         return await call_next(request)
 
 
 app.add_middleware(_AuthMiddleware)
+app.include_router(api.router)
 
 
 async def _current_user(request: Request) -> str:
@@ -507,9 +542,21 @@ async def _current_user(request: Request) -> str:
     return user
 
 
-async def _owned_job(job_id: str, username: str) -> dict[str, Any]:
+async def _owned_job(job_id: str, username: str,
+                     request: Optional[Request] = None) -> dict[str, Any]:
+    """The job's working meta, if this user may work on it.
+
+    A job tied to a document (every upload and batch run now is) is shared work:
+    any active account may open it; monitors are kept read-only by the
+    middleware. When Redis has let the working copy lapse, it is rebuilt from
+    the database and the stored original.
+    """
     meta = await store.get_job(job_id)
-    if meta is None or meta.get("owner") != username:
+    if meta is None:
+        meta = await esource.restore_job(job_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="That extraction could not be found.")
+    if meta.get("owner") != username and not meta.get("document_id"):
         raise HTTPException(status_code=404, detail="That extraction could not be found.")
     return meta
 
@@ -542,28 +589,56 @@ class LoginRequest(BaseModel):
     password: str
 
 
+def _client_ip(request: Optional[Request]) -> Optional[str]:
+    return api.client_ip(request) if request is not None else None
+
+
 @app.post("/api/login")
-async def login(request: LoginRequest, response: Response) -> dict[str, Any]:
-    username = (request.username or "").strip()
-    if not username or not auth.authenticate(username, request.password or ""):
+async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, Any]:
+    username = (body.username or "").strip()
+    try:
+        user = await auth.authenticate(username, body.password or "",
+                                       client_ip=_client_ip(request)) if username else None
+    except auth.Locked as exc:
+        raise HTTPException(
+            status_code=423,
+            detail=f"This account is locked after too many attempts. Try again after "
+                   f"{exc.until.strftime('%H:%M UTC')}, or ask an administrator to unlock it.",
+        ) from exc
+    if user is None:
         raise HTTPException(status_code=401, detail="Incorrect username or password.")
-    token = await auth.create_session(store.get_redis(), username)
+    token = await auth.create_session(store.get_redis(), user.username)
     response.set_cookie(value=token, **auth.cookie_kwargs())
-    log.info("login: %s", username)
-    return {"username": username}
+    log.info("login: %s", user.username)
+    return {**_me(user), "expires_in": auth.idle_seconds()}
+
+
+def _me(user: Any) -> dict[str, Any]:
+    return {"username": user.username, "full_name": user.full_name, "role": user.role,
+            "idle_seconds": auth.idle_seconds()}
 
 
 @app.post("/api/logout")
 async def logout(request: Request, response: Response) -> dict[str, Any]:
     token = request.cookies.get(auth.COOKIE_NAME)
+    username = getattr(request.state, "user", None)
     await auth.destroy_session(store.get_redis(), token)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
+    if username:
+        await audit.record_now("auth.logout", username=username, client_ip=_client_ip(request))
     return {"ok": True}
 
 
 @app.get("/api/me")
 async def me(request: Request) -> dict[str, Any]:
-    return {"username": await _current_user(request)}
+    user = await auth.get_user(await _current_user(request))
+    return {**_me(user), "expires_in": getattr(request.state, "expires_in", None)}
+
+
+@app.post("/api/session/ping")
+async def session_ping(request: Request) -> dict[str, Any]:
+    await _current_user(request)
+    return {"expires_in": getattr(request.state, "expires_in", None)}
 
 
 @app.get("/")
@@ -591,9 +666,12 @@ async def session() -> dict[str, Any]:
         "credits": {"available": False} if _vision() else await _credits(),
         "reader": {
             "kind": "vision" if _vision() else "llamaparse",
-            "model": fields.model_name(),
-            "second_read": fields.second_read_model(),
+            "model": fields.read_models(True)[0],
+            "second_read": fields.read_models(True)[1],
+            "preferred": fields.preferred_read(),
         },
+        "features": {"sources": bool(__import__("sources").load()),
+                     "audit_delivery": "live" if edc_audit.endpoint() else "held"},
         "max_file_mb": MAX_BYTES // (1024 * 1024),
         "mapping": {
             "ready": fields.configured(),
@@ -636,7 +714,7 @@ async def create_extraction(
         )
 
     if _vision():
-        return await _create_vision_job(username, filename, contents)
+        return await _create_vision_job(username, filename, contents, request)
 
     client = get_client()
     try:
@@ -669,7 +747,8 @@ async def create_extraction(
     }
 
 
-async def _create_vision_job(username: str, filename: str, contents: bytes) -> dict[str, Any]:
+async def _create_vision_job(username: str, filename: str, contents: bytes,
+                             request: Optional[Request] = None) -> dict[str, Any]:
     """Render the pages now. There is nothing to wait for after this."""
     if not fields.configured():
         raise HTTPException(
@@ -696,16 +775,21 @@ async def _create_vision_job(username: str, filename: str, contents: bytes) -> d
         "items": [],
         "images": images,
     })
+    ids = await esource.register_upload(username, filename, contents, len(images), job_id,
+                                        client_ip=_client_ip(request))
+    meta.update(ids)
     await store.put_job(job_id, meta)
     log.info("rendered %s page(s) of %s for %s in %.1fs", len(images), filename,
              job_id, time.monotonic() - started)
     return {"job_id": job_id, "filename": filename, "mode": "vision",
-            "page_count": len(images), "status": "COMPLETED"}
+            "page_count": len(images), "status": "COMPLETED", **ids}
 
 
 def _vision_status(meta: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": meta["job_id"],
+        "document_id": meta.get("document_id"),
+        "extraction_id": meta.get("extraction_id"),
         "status": "COMPLETED",
         "filename": meta.get("filename"),
         "mode": "vision",
@@ -944,7 +1028,17 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
 @app.post("/api/documents/{job_id}/header")
 async def read_header(job_id: str, request: Request) -> dict[str, Any]:
     username = await _current_user(request)
-    return await _read_header(job_id, username)
+    response = await _read_header(job_id, username)
+    await _remember_stage(job_id, "header", response, username)
+    return response
+
+
+async def _remember_stage(job_id: str, kind: str, value: dict[str, Any], username: str) -> None:
+    """Keep what an interactive step produced with its extraction run."""
+    try:
+        await esource.remember_stage(job_id, kind, value, username, await store.get_job(job_id))
+    except Exception as exc:
+        log.warning("could not record the %s stage for %s: %s", kind, job_id, exc)
 
 
 @app.get("/api/cronos/forms")
@@ -1089,8 +1183,12 @@ async def load_visit(job_id: str, request: VisitRequest, http_request: Request) 
     await store.put_job(job_id, meta)
     log.info("visit %s/%s/%s: %s CRF(s)", request.protocol_no, request.screening_no,
              request.visit_name, len(definition["sections"]))
-    return {"document": _document_meta(job_id, meta), "form": _visit_view(definition),
-            "unsaveable": visit_forms.unsaveable(definition)}
+    response = {"document": _document_meta(job_id, meta), "form": _visit_view(definition),
+                "unsaveable": visit_forms.unsaveable(definition)}
+    await _remember_stage(job_id, "visit", {**response, "_triple": {
+        "protocol_no": request.protocol_no, "screening_no": request.screening_no,
+        "visit_name": cronos.format_visit_name(request.visit_name)}}, username)
+    return response
 
 
 class VisitMapRequest(BaseModel):
@@ -1103,7 +1201,19 @@ async def map_to_visit(job_id: str, request: VisitMapRequest,
                        http_request: Request) -> dict[str, Any]:
     """Step three: read the document against the CRFs the EDC returned."""
     username = await _current_user(http_request)
-    meta, parse = await _parse_artifacts(job_id, username)
+    await _owned_job(job_id, username, http_request)
+    payload = await _map_job(job_id, request.header, request.pages)
+    await _remember_stage(job_id, "payload", payload, username)
+    return payload
+
+
+async def _map_job(job_id: str, header_edits: dict[str, Any],
+                   pages: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """Read a job's document into its EDC visit. Shared by the route and the batch worker."""
+    meta = await store.get_job(job_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="That extraction could not be found.")
+    meta, parse = await _parse_artifacts(job_id, meta["owner"])
     definition = meta.get("visit_definition")
     if not definition:
         raise HTTPException(
@@ -1115,14 +1225,14 @@ async def map_to_visit(job_id: str, request: VisitMapRequest,
     index = anchors.PageIndex(parse.get("items") or [])
 
     header = mapping.build_header(meta.get("header_rows") or [], index)
-    _apply_header_edits(header, request.header)
+    _apply_header_edits(header, header_edits or {})
     confirmed = mapping.header_values(header["groups"])
 
     started = time.monotonic()
     try:
         async with _read_sem:
             result = await fields.extract_form(document, definition, confirmed,
-                                               parse.get("images") or request.pages)
+                                               parse.get("images") or pages or {})
     except fields.ExtractionUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     log.info("visit read for %s in %.1fs (%s value(s), %s page image(s), second read %s)",
@@ -1139,6 +1249,7 @@ async def map_to_visit(job_id: str, request: VisitMapRequest,
     payload["truncated"] = fields.was_truncated(document)
     payload["usage"] = result.get("usage", {})
     payload["reading"] = {"page_images": result.get("images", 0),
+                          "primary_read": result.get("primary_read"),
                           "second_read": result.get("second_read")}
     return payload
 
@@ -1227,34 +1338,10 @@ async def save_visit(job_id: str, request: VisitSaveRequest,
         log.info("visit save for %s: dry run, nothing sent", job_id)
         return {"sent": False, "dry_run": True, "counts": counts, "delta": delta,
                 "warnings": warnings, "payload": body}
-    if not body["crfs"]:
-        log.info("visit save for %s: every value already matches the EDC, nothing sent", job_id)
-        return {"sent": False, "unchanged": True, "counts": counts, "delta": delta,
-                "warnings": warnings}
-
-    try:
-        result = await edc.save_visit(body)
-    except edc.EdcUnavailable as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    audit = {
-        "at": time.time(),
-        "username": username,
-        "job_id": job_id,
-        "protocolNo": body.get("protocolNo"),
-        "screeningNo": body.get("screeningNo"),
-        "visitName": body.get("visitName"),
-        "counts": counts,
-    }
-    log.info("visit save for %s by %s: %s/%s/%s — %s value(s), %s image(s)",
-             job_id, username, body.get("protocolNo"), body.get("screeningNo"),
-             body.get("visitName"), counts["values"], counts["images"])
-    try:
-        await store.audit_save(audit)
-    except Exception as exc:
-        log.warning("audit log write failed: %s", exc)
-    return {"sent": True, "counts": counts, "delta": delta, "warnings": warnings,
-            "result": result}
+    raise HTTPException(
+        status_code=410,
+        detail="Submitting to the EDC needs your electronic signature now. Use Submit to EDC.",
+    )
 
 
 class LocateRequest(BaseModel):

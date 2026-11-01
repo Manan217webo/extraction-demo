@@ -19,6 +19,9 @@ dependencies = [
     "pytesseract>=0.3.10",
     "redis>=5",
     "pypdfium2>=4.30",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.22.1",
+    "asyncpg>=0.32.0",
 ]
 
 [tool.uv]
@@ -26,3 +29,9 @@ dependencies = [
 # name rather than installed. Nothing to build, so uv manages the environment
 # without trying to package the project.
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1",
+]
