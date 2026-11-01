@@ -214,3 +214,47 @@ def test_same_value_rules():
     assert same_value("Yes", "yes")
     assert not same_value("12", "13")
     assert not same_value("", "x")
+
+
+# --------------------------------------------------------------------------- EDC audit delivery
+
+
+def test_audit_delivery_posts_in_order_and_backs_off(isolated, monkeypatch):
+    import httpx
+
+    import audit
+    import db
+    import edc_audit
+
+    sent: list[dict] = []
+    answers = iter([503, 200])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        sent.append({"body": _json.loads(request.content), "key": request.headers["Idempotency-Key"]})
+        return httpx.Response(next(answers), json={})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+
+    async def scenario():
+        await audit.record_now("auth.login", username="alice")  # before an endpoint: held
+        monkeypatch.setenv("EDC_AUDIT_URL", "https://edc.example/api/audit")
+        await audit.record_now("auth.logout", username="alice")
+        await edc_audit._release_held()
+        assert await edc_audit.deliver_once() == 0  # 503: kept, retried later
+        state = await edc_audit.status()
+        assert state["counts"]["pending"] == 2 and state["last_error"]
+        async with db.session() as s:  # make the retry due now
+            from sqlalchemy import update
+            await s.execute(update(db.AuditOutbox).values(next_attempt_at=db.utcnow()))
+            await s.commit()
+        assert await edc_audit.deliver_once() == 2
+        assert (await edc_audit.status())["counts"]["sent"] == 2
+
+    run(scenario())
+    records = sent[-1]["body"]["records"]
+    assert [r["Action"] for r in records] == ["auth.login", "auth.logout"]
+    assert records[1]["PrevHash"] == records[0]["Hash"]
+    assert sent[0]["key"] == sent[1]["key"]  # the same batch retried is recognisable

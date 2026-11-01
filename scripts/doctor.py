@@ -154,16 +154,54 @@ def check_edc_host() -> None:
         record(PASS, "EDC_BASE_URL", url)
 
 
-def check_users() -> None:
-    users = auth.load_users()
-    if users:
-        record(PASS, "Reviewer accounts",
-               f"{len(users)} user(s) in {auth.users_path()}")
+async def check_database() -> None:
+    import audit
+    import db
+    import sources
+    from sqlalchemy import func, select
+
+    url = db.database_url()
+    shown = url.split("@")[-1]
+    if production() and not url.startswith("postgresql"):
+        record(FAIL, "Database", f"{shown} — production needs PostgreSQL (DATABASE_URL)")
+    try:
+        await db.init()
+        async with db.session() as session:
+            admins = (await session.execute(select(func.count()).select_from(db.User)
+                                            .where(db.User.role == "admin",
+                                                   db.User.active.is_(True)))).scalar()
+            users = (await session.execute(select(func.count()).select_from(db.User))).scalar()
+            chain = await audit.verify(session)
+    except Exception as exc:
+        record(FAIL, "Database", f"{shown} — {exc}")
         return
-    status = FAIL if production() else WARN
-    record(status, "Reviewer accounts",
-           f"no users in {auth.users_path()} — run "
-           "`uv run scripts/add_user.py <name>` before go-live.")
+    record(PASS, "Database", shown)
+    if users:
+        record(PASS if admins else WARN, "Accounts",
+               f"{users} account(s), {admins} active admin(s)")
+    else:
+        record(FAIL if production() else WARN, "Accounts",
+               "none — run `uv run scripts/add_user.py <name> --full-name \"…\" --role admin`")
+    record(PASS if chain["ok"] else FAIL, "Audit trail",
+           f"hash chain intact over {chain['checked']} event(s)" if chain["ok"]
+           else f"hash chain BROKEN at event #{chain['broken_at']}")
+    keyed = bool((os.getenv("AUDIT_HMAC_KEY") or "").strip())
+    record(PASS if keyed else (FAIL if production() else WARN), "Audit HMAC key",
+           "set" if keyed else "AUDIT_HMAC_KEY is unset — the chain is plain SHA-256")
+    delivery = (os.getenv("EDC_AUDIT_URL") or "").strip()
+    record(PASS if delivery else WARN, "Audit delivery to the EDC",
+           delivery or "EDC_AUDIT_URL unset — audit records are kept locally (held) until it is set")
+    configured = sources.load()
+    if configured:
+        for conn in configured.values():
+            try:
+                entries, _ = await conn.list_dir("")
+                record(PASS, f"Source “{conn.name}”", f"{conn.describe()} ({len(entries)} item(s) at the top)")
+            except sources.SourceError as exc:
+                record(FAIL, f"Source “{conn.name}”", f"{conn.describe()} — {exc}")
+    else:
+        record(WARN, "File-server sources", "none configured (SOURCES_FILE) — only uploads will work")
+    await db.close()
 
 
 async def check_redis() -> None:
@@ -242,8 +280,8 @@ async def main() -> int:
     check_local_definitions()
     check_edc_host()
     check_fixture_mode()
-    check_users()
     await check_redis()
+    await check_database()
     await check_edc_visit()
     await store.close()
 

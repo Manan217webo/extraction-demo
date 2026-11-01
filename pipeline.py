@@ -210,7 +210,10 @@ async def _run(extraction_id: str) -> None:
         images = await render.page_images(data, web.MAX_PAGES)
     except render.RenderError as exc:
         raise Permanent(str(exc)) from exc
-    meta = {"job_id": job_id, "filename": filename, "mode": "vision", "parser": "vision",
+    # A retried run keeps what its earlier attempt already read (the header).
+    previous = await store.get_job(job_id) or {}
+    meta = {**{k: previous[k] for k in WORKING_KEYS if k in previous},
+            "job_id": job_id, "filename": filename, "mode": "vision", "parser": "vision",
             "pages": len(images), "owner": owner, "document_id": document.id,
             "extraction_id": extraction_id}
     await store.put_parse(job_id, {"markdown": "", "items": [], "images": images,

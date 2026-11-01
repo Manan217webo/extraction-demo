@@ -578,10 +578,10 @@ def _asset_stamp() -> str:
 
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
-    ok = await store.ping()
-    if not ok:
-        return JSONResponse({"ok": False, "redis": False}, status_code=503)
-    return {"ok": True, "redis": True}
+    redis_ok, db_ok = await store.ping(), await db.ping()
+    if not (redis_ok and db_ok):
+        return JSONResponse({"ok": False, "redis": redis_ok, "database": db_ok}, status_code=503)
+    return {"ok": True, "redis": True, "database": True}
 
 
 class LoginRequest(BaseModel):

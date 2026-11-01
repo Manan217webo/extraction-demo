@@ -1,0 +1,10 @@
+{
+  "sources": [
+    {
+      "id": "icr23-site04",
+      "name": "ICR-23-001 · Site 04",
+      "kind": "local",
+      "location": "/sources/ICR-23-001/Site04"
+    }
+  ]
+}

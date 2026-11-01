@@ -721,6 +721,8 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         values: dict[int, str] = {}
         images: list[dict[str, Any]] = []
         images_by_index: dict[int, dict[str, Any]] = {}
+        keys: dict[int, str] = {}
+        labels: dict[int, Optional[str]] = {}
 
         def place(field: dict[str, Any], key: str, addr: str, row: Optional[int]) -> None:
             index = address.get(addr)
@@ -745,9 +747,11 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
             existing = meta["fields"][index].get("value") or ""
             if same_value(new_value, existing):
                 skipped.append({"crfName": meta["crfName"], "label": field.get("label"),
-                                "value": new_value})
+                                "key": field.get("key") or key, "value": new_value})
                 return
             values[index] = new_value
+            keys[index] = field.get("key") or key
+            labels[index] = field.get("label")
             # The browser keys crops by field.key. The reconstructed address is
             # the fallback when a payload was built without keys.
             crop_key = field.get("key") or key
@@ -822,6 +826,7 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
             slot = meta["fields"][index]
             changes.append({"crfName": meta["crfName"], "crfId": meta["crfId"],
                             "field_id": slot.get("field_id"), "fieldName": slot["fieldName"],
+                            "key": keys.get(index), "label": labels.get(index) or slot["fieldName"],
                             "old": slot.get("value") or "", "new": value})
         crf: dict[str, Any] = {
             "crfName": meta["crfName"],

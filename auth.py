@@ -154,11 +154,15 @@ class Locked(Exception):
         self.until = until
 
 
+def _iso(value: Optional[dt.datetime]) -> Optional[str]:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z") if value else None
+
+
 def user_dict(user: Any) -> dict[str, Any]:
     return {"username": user.username, "full_name": user.full_name, "role": user.role,
             "active": user.active,
-            "locked_until": user.locked_until.isoformat() if user.locked_until else None,
-            "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None}
+            "locked_until": _iso(user.locked_until),
+            "last_login_at": _iso(user.last_login_at)}
 
 
 async def authenticate(username: str, password: str, *, client_ip: Optional[str] = None,

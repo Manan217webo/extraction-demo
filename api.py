@@ -924,8 +924,7 @@ async def audit_list(request: Request, user: Optional[str] = None,
                      document_id: Optional[str] = None, subject: Optional[str] = None,
                      action: Optional[str] = None, q: Optional[str] = None,
                      start: Optional[str] = None, end: Optional[str] = None,
-                     before: Optional[int] = None, limit: int = 100,
-                     **_: Any) -> dict[str, Any]:
+                     before: Optional[int] = None, limit: int = 100) -> dict[str, Any]:
     me = await current(request)
     params = request.query_params
     start = start or params.get("from")

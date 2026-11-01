@@ -12,20 +12,64 @@ services:
       timeout: 3s
       retries: 10
 
+  # The system of record: documents, versions, drafts, signatures, submissions
+  # and the append-only audit trail. Back this volume up.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: esource
+      POSTGRES_USER: esource
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esource -d esource"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   app:
     build: .
     env_file: .env
-    environment:
+    environment: &app_env
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+asyncpg://esource:${POSTGRES_PASSWORD:-change-me}@postgres:5432/esource
+      DATA_DIR: /data
+      SOURCES_FILE: /config/sources.json
       APP_ENV: ${APP_ENV:-production}
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+      WORKER_IN_PROCESS: "0"
       PORT: "8000"
-    volumes:
-      - ./users.json:/app/users.json:ro
+    volumes: &app_volumes
+      # Original source files, write-once (put this on an encrypted, backed-up disk).
+      - originals:/data
+      # Which file-server folders reviewers may scan from.
+      - ./sources.json:/config/sources.json:ro
+      # The file server itself, mounted read-only. Mount the SMB/NFS share on the
+      # host (e.g. /mnt/crf-share) and set SOURCE_SHARE to that path; sources.json
+      # then lists folders under /sources.
+      - ${SOURCE_SHARE:-./share}:/sources:ro
     ports:
       - "${PORT:-8000}:8000"
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # Batch scans and audit delivery to the EDC, outside the web workers.
+  worker:
+    build: .
+    env_file: .env
+    environment: *app_env
+    volumes: *app_volumes
+    command: ["uv", "run", "worker.py"]
+    healthcheck:
+      disable: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
 
   caddy:
@@ -43,5 +87,7 @@ services:
 
 volumes:
   redis_data:
+  pg_data:
+  originals:
   caddy_data:
   caddy_config:
