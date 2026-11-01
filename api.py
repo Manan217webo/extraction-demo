@@ -740,6 +740,14 @@ async def preflight(document_id: str, body: PreflightRequest, request: Request) 
         document = await _document(session, document_id)
         extraction = await esource.current_extraction(session, document.id)
     save, warnings, delta = await _fresh_save(document, extraction, body.payload, {})
+    open_flags = [f.get("label") for f in documents.iter_form_fields(body.payload.get("form") or {})
+                  if f.get("value") is not None and f.get("status") not in ("edited", "manual")
+                  and set(f.get("issues") or []) & {"reads_disagree", "one_read_only", "low_confidence"}]
+    if open_flags:
+        warnings = [f"{len(open_flags)} value(s) the AI was unsure of haven't been changed "
+                    f"— make sure you checked them against the page: "
+                    f"{', '.join(str(x) for x in open_flags[:6])}"
+                    f"{'…' if len(open_flags) > 6 else ''}."] + warnings
     return {"changes": delta["changes"], "skipped": delta["skipped"], "warnings": warnings,
             "blocked": _blocked(body.payload), "diff_sha": esource.canonical_sha(delta["changes"]),
             "visit": {"protocol_no": document.protocol_no, "screening_no": document.screening_no,
@@ -834,12 +842,15 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
               "values": len(delta["changes"]), "unchanged": len(delta["skipped"]),
               "images": sum(len(c["images"]) for c in save["crfs"])}
     status, response, error = "unchanged", None, None
+    verification: Optional[dict[str, Any]] = None
     if save["crfs"]:
         try:
             response = await edc.save_visit(save)
             status = "sent"
         except edc.EdcUnavailable as exc:
             status, error = "failed", str(exc)
+        if status == "sent":
+            verification = await _verify_in_edc(document, delta["changes"])
 
     async with db.session() as session:
         document = await _document(session, document_id)
@@ -847,7 +858,9 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                                    draft_revision=draft_rev, signature_id=signature_id,
                                    submitted_by=user.username, status=status,
                                    changes=delta["changes"], skipped=len(delta["skipped"]),
-                                   images=counts["images"], edc_response=response, error=error)
+                                   images=counts["images"], error=error,
+                                   edc_response={"response": response,
+                                                 "verification": verification})
         session.add(submission)
         if status != "failed":
             document.status = "submitted"
@@ -856,7 +869,8 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
         await audit.record(session, action, username=user.username, document=document,
                            client_ip=ip, new_value=status, reason=error,
                            details={"counts": counts, "changes": delta["changes"],
-                                    "signature_id": signature_id})
+                                    "signature_id": signature_id,
+                                    "verification": verification})
         for change in delta["changes"] if status == "sent" else []:
             await audit.record(session, "field.changed", username=user.username,
                                document=document, client_ip=ip,
@@ -870,8 +884,37 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
     if status == "failed":
         raise HTTPException(502, f"{error} Your signature and draft are saved; "
                                  "submit again when the EDC is back.")
+    if verification and verification.get("mismatches"):
+        warnings = warnings + [
+            f"The EDC shows a different value for {len(verification['mismatches'])} field(s) "
+            "after the save. Check them in the EDC."]
     return {"status": status, "counts": counts, "delta": delta, "warnings": warnings,
-            "signature": esource.signature_dict(signed)}
+            "verification": verification, "signature": esource.signature_dict(signed)}
+
+
+async def _verify_in_edc(document: db.Document, changes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Read the visit back and confirm each sent value is what the EDC now holds."""
+    import edc
+    import visit_forms
+    try:
+        visit = await edc.get_visit(document.protocol_no, document.screening_no,
+                                    document.visit_name)
+    except edc.EdcUnavailable as exc:
+        return {"checked": False, "error": str(exc)}
+    held: dict[tuple, Any] = {}
+    for crf in visit.get("crfs") or []:
+        for field in crf.get("fields") or []:
+            held[(crf.get("crfId"), field.get("field_id"))] = field.get("value")
+    mismatches = []
+    for change in changes:
+        if change.get("field_id") is None:
+            continue
+        now = held.get((change["crfId"], change["field_id"]))
+        if not visit_forms.same_value(str(change["new"]), str(now or "")):
+            mismatches.append({"crfName": change["crfName"], "fieldName": change["fieldName"],
+                               "sent": change["new"], "edc": now})
+    return {"checked": True, "matched": len(changes) - len(mismatches),
+            "mismatches": mismatches}
 
 
 # --------------------------------------------------------------------------- audit
