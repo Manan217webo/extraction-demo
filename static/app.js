@@ -3186,11 +3186,20 @@ function showLogin(message) {
   els.loginUsername.focus();
 }
 
+function setPasswordRevealed(revealed) {
+  const btn = $("login-reveal");
+  els.loginPassword.type = revealed ? "text" : "password";
+  if (!btn) return;
+  btn.setAttribute("aria-pressed", revealed ? "true" : "false");
+  btn.setAttribute("aria-label", revealed ? "Hide password" : "Show password");
+}
+
 function hideLogin() {
   document.body.classList.remove("signed-out");
   els.loginOverlay.classList.add("hidden");
   els.loginError.classList.add("hidden");
   els.loginPassword.value = "";
+  setPasswordRevealed(false);
 }
 
 function showSignedIn(user) {
@@ -3288,6 +3297,11 @@ onUnauthorized = () => {
   if (was) announceSignedOut();
 };
 
+$("login-reveal").addEventListener("click", () => {
+  setPasswordRevealed(els.loginPassword.type === "password");
+  els.loginPassword.focus();
+});
+
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   els.loginError.classList.add("hidden");
@@ -3312,7 +3326,7 @@ els.loginForm.addEventListener("submit", async (event) => {
     els.loginError.classList.toggle("is-locked", error.status === 423);
     els.loginError.classList.remove("hidden");
     if (error.status !== 423) {
-      els.loginPassword.select();
+      els.loginPassword.focus();
     }
   } finally {
     els.loginSubmit.disabled = false;
