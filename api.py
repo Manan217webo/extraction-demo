@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime as dt
+import hmac
 import io
 import json
 import logging
@@ -1111,6 +1112,31 @@ async def audit_delivery_retry(request: Request) -> dict[str, Any]:
     import edc_audit
     await admin(request)
     return {"requeued": await edc_audit.retry_failed()}
+
+
+# --------------------------------------------------------------------------- EDC pull
+
+
+@router.get("/edc/audit")
+async def edc_audit_pull(request: Request, after: int = 0, limit: int = 500) -> dict[str, Any]:
+    """The audit trail for the EDC to fetch, oldest first, with an API key instead of a
+    sign-in. The EDC keeps `next_after` and asks again from there; the records are the
+    same AuditRecords the push sends. Off (404) until EDC_PULL_API_KEY is set."""
+    import edc_audit
+    keys = edc_audit.pull_keys()
+    if not keys:
+        raise HTTPException(404, "Not Found")
+    scheme, _, given = (request.headers.get("authorization") or "").partition(" ")
+    given = given.strip()
+    if scheme.lower() != "bearer" or not given or not any(
+            hmac.compare_digest(given.encode(), key.encode()) for key in keys):
+        log.warning("EDC audit pull refused from %s: bad or missing key", client_ip(request))
+        raise HTTPException(401, "A valid API key is required.",
+                            headers={"WWW-Authenticate": "Bearer"})
+    page = await edc_audit.pull(after=after, limit=limit)
+    log.info("EDC pulled %d audit records after seq %d from %s",
+             len(page["records"]), after, client_ip(request))
+    return page
 
 
 # --------------------------------------------------------------------------- admin

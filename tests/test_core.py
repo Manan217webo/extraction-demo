@@ -278,3 +278,72 @@ def test_crf_without_field_ids_is_sent_in_full():
         {"field_id": "dbp", "label": "DBP", "value": "85", "key": "vitals.dbp"}]}]}
     body, _ = visit_forms.build_save(definition, form, {})
     assert [f["value"] for f in body["crfs"][0]["fields"]] == ["120", "85", ""]
+
+
+# --------------------------------------------------------------------------- EDC pull
+
+
+def _pull_client():
+    import app
+    from fastapi.testclient import TestClient
+    return TestClient(app.app)
+
+
+def test_edc_pull_is_off_without_a_key_and_refuses_a_wrong_one(isolated, monkeypatch):
+    monkeypatch.delenv("EDC_PULL_API_KEY", raising=False)
+    client = _pull_client()
+    assert client.get("/api/edc/audit").status_code == 404
+
+    monkeypatch.setenv("EDC_PULL_API_KEY", "old-key, new-key")
+    assert client.get("/api/edc/audit").status_code == 401
+    assert client.get("/api/edc/audit",
+                      headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/api/edc/audit",
+                      headers={"Authorization": "Basic new-key"}).status_code == 401
+    for key in ("old-key", "new-key"):
+        assert client.get("/api/edc/audit",
+                          headers={"Authorization": f"Bearer {key}"}).status_code == 200
+    # The key opens this endpoint only, never the signed-in API.
+    assert client.get("/api/audit",
+                      headers={"Authorization": "Bearer new-key"}).status_code == 401
+
+
+def test_edc_pull_pages_through_the_trail_in_order(isolated, monkeypatch):
+    import audit
+    import db
+
+    async def write():
+        async with db.session() as s:
+            for i in range(5):
+                await audit.record(s, "field.changed", username="alice", field=f"f{i}",
+                                   old_value=i, new_value=i + 1, reason="test",
+                                   protocol_no="ICR-23-001", screening_no="S-01")
+            await s.commit()
+
+    run(write())
+    monkeypatch.setenv("EDC_PULL_API_KEY", "k")
+    client = _pull_client()
+    auth_ = {"Authorization": "Bearer k"}
+
+    first = client.get("/api/edc/audit?limit=2", headers=auth_).json()
+    assert [r["ItemRef"] for r in first["records"]] == ["f0", "f1"]
+    assert first["has_more"] and first["head_seq"] == 5
+    assert first["records"][0]["StudyOID"] == "ICR-23-001"
+    assert first["records"][0]["SubjectKey"] == "S-01"
+    assert first["records"][1]["PrevHash"] == first["records"][0]["Hash"]
+
+    rest = client.get(f"/api/edc/audit?after={first['next_after']}&limit=10",
+                      headers=auth_).json()
+    assert [r["ItemRef"] for r in rest["records"]] == ["f2", "f3", "f4"]
+    assert rest["records"][0]["PrevHash"] == first["records"][-1]["Hash"]
+    assert not rest["has_more"]
+
+    caught_up = client.get(f"/api/edc/audit?after={rest['next_after']}", headers=auth_).json()
+    assert caught_up["records"] == [] and caught_up["next_after"] == rest["next_after"]
+
+    # Pulling leaves push delivery alone.
+    async def outbox():
+        from sqlalchemy import select
+        async with db.session() as s:
+            return {o.status for o in (await s.execute(select(db.AuditOutbox))).scalars()}
+    assert run(outbox()) == {"held"}

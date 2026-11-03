@@ -99,6 +99,28 @@ needs a signature, so it goes through `/docs/{id}/submit`.
 
 `Event = {seq, id, ts, action, username, full_name, role, document_id, protocol_no, screening_no, visit_name, field, old_value, new_value, reason, details, client_ip, app_version, prev_hash, hash, delivery:{status, attempts, last_error, sent_at}}`
 
+### EDC pull (system-to-system)
+
+For the EDC to fetch the trail itself instead of (or as well as) receiving the push
+to `EDC_AUDIT_URL`. No sign-in: the caller sends an API key from `EDC_PULL_API_KEY`.
+The endpoint answers 404 until that is set.
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET | `/edc/audit?after=0&limit=500` | `Authorization: Bearer <key>` → `{source, sourceVersion, records:[AuditRecord], next_after, has_more, head_seq}` |
+
+- Records come oldest first, with `Sequence > after`. `limit` is 1–1000 (default 500).
+- Keep `next_after` and pass it as `after` next time; while `has_more` is true, ask again
+  straight away. Polling every minute or so is plenty.
+- A record never appears behind one with a higher `Sequence`, so following `next_after`
+  never skips one. Sequences may have gaps; a record's `PrevHash` equals the previous
+  record's `Hash`, which shows nothing real is missing.
+- `AuditRecord` is the same object the push sends: `AuditRecordID, Sequence, DateTimeStamp,
+  Action, UserRef{LoginName, FullName, Role}, LocationRef{IP}, ReasonForChange, StudyOID,
+  SubjectKey, StudyEventOID, FormOID, ItemOID, ItemRef, OldValue, NewValue,
+  SourceDocumentID, Details, SourceSystemVersion, PrevHash, Hash`.
+- 401 for a missing or wrong key. Pulling does not change push delivery status.
+
 ## Admin
 
 | Method | Path | Body → Response |

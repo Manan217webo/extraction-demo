@@ -77,6 +77,8 @@ API_BASE = (os.getenv("LLAMA_CLOUD_BASE_URL") or "https://api.cloud.llamaindex.a
 GENERIC_FAILURE = "We couldn't process this document. Please try again."
 
 PUBLIC_API_PATHS = {"/api/login", "/healthz"}
+# Called by other systems with their own API key, checked by the route, not a session.
+KEY_API_PATHS = {"/api/edc/audit"}
 # The only writes a read-only monitor makes: ending or keeping their own session.
 MONITOR_WRITES = {"/api/logout", "/api/session/ping"}
 
@@ -508,7 +510,8 @@ def _serialize(result: Any, meta: dict[str, Any]) -> dict[str, Any]:
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+        if path.startswith("/api/") and path not in PUBLIC_API_PATHS \
+                and path not in KEY_API_PATHS:
             token = request.cookies.get(auth.COOKIE_NAME)
             # Background polling (GET) must not keep an idle session alive; a
             # write or an explicit ping is the reviewer actually working.

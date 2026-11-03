@@ -143,6 +143,41 @@ async def deliver_once() -> int:
     return 0 if error else len(ids)
 
 
+PULL_MAX = 1000
+
+
+def pull_keys() -> list[str]:
+    """Keys the EDC may fetch the trail with. Comma-separated, so a new key can be
+    added before the old one is removed. Separate from the keys this app sends
+    with: those prove who we are to the EDC, this proves who the EDC is to us."""
+    raw = os.getenv("EDC_PULL_API_KEY") or ""
+    return [key.strip() for key in raw.split(",") if key.strip()]
+
+
+async def pull(after: int = 0, limit: int = 500) -> dict[str, Any]:
+    """Records with a sequence above `after`, oldest first.
+
+    Every audit write holds the chain lock until it commits, so a record can't
+    become visible after one with a higher sequence: a reader that keeps
+    `next_after` never skips one. Sequences can have gaps (a rolled-back write
+    uses a number and leaves no row); PrevHash/Hash show that nothing real is
+    missing.
+    """
+    after = max(0, after)
+    limit = max(1, min(limit, PULL_MAX))
+    async with db.session() as session:
+        events = (await session.execute(
+            select(db.AuditEvent).where(db.AuditEvent.seq > after)
+            .order_by(db.AuditEvent.seq).limit(limit + 1))).scalars().all()
+        head = (await session.execute(select(func.max(db.AuditEvent.seq)))).scalar()
+    more = len(events) > limit
+    events = events[:limit]
+    return {"source": "webo-esource", "sourceVersion": audit.APP_VERSION,
+            "records": [record(event) for event in events],
+            "next_after": events[-1].seq if events else after,
+            "has_more": more, "head_seq": head or 0}
+
+
 async def status() -> dict[str, Any]:
     async with db.session() as session:
         rows = (await session.execute(
