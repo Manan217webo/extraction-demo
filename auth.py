@@ -162,7 +162,141 @@ def user_dict(user: Any) -> dict[str, Any]:
     return {"username": user.username, "full_name": user.full_name, "role": user.role,
             "active": user.active,
             "locked_until": _iso(user.locked_until),
-            "last_login_at": _iso(user.last_login_at)}
+            "last_login_at": _iso(user.last_login_at),
+            "auth_source": is_cronos(user) and "cronos" or "local",
+            "cronos_user_id": getattr(user, "cronos_user_id", None)}
+
+
+def is_cronos(user: Any) -> bool:
+    return getattr(user, "auth_source", None) == "cronos"
+
+
+# A cronos account's password_hash: not a scrypt string, so a local check never matches.
+CRONOS_PASSWORD = "!cronos"
+
+
+def uses_local_login(user: Optional[Any]) -> bool:
+    """With Cronos sign-in on, only local admin accounts sign in here (break-glass)."""
+    import cronos_auth
+    if not cronos_auth.enabled():
+        return True
+    return (user is not None and not is_cronos(user) and user.role == "admin"
+            and cronos_auth.local_admin_allowed())
+
+
+async def sign_in_with_cronos(username: str, password: str, *,
+                              client_ip: Optional[str] = None) -> tuple[Any, Any]:
+    """(user, grant) after Cronos accepts the password. Creates or updates the local
+    row: matched on the Cronos user id first, so a change of case in the login still
+    finds the same person. Raises cronos_auth.CronosAuthError, audited."""
+    import audit
+    import cronos_auth
+    import db
+    from sqlalchemy import select
+
+    try:
+        grant = await cronos_auth.login(username, password)
+    except cronos_auth.CronosAuthError as exc:
+        await audit.record_now("auth.locked" if exc.code == "AUTH_ACCOUNT_LOCKED"
+                               else "auth.login_failed",
+                               username=username or "unknown", client_ip=client_ip,
+                               details={"via": "cronos", "why": exc.code})
+        raise
+    role = cronos_auth.map_role(grant.roles)
+    if role is None:
+        await audit.record_now("auth.login_failed", username=username, client_ip=client_ip,
+                               details={"via": "cronos", "why": "no mapped role",
+                                        "cronos_roles": grant.roles})
+        raise cronos_auth.CronosAuthError(
+            403, "ROLE_NOT_MAPPED",
+            "Your Cronos role doesn't give access to eSource. Ask an administrator.")
+    async with db.session() as session:
+        user = (await session.execute(select(db.User).where(
+            db.User.cronos_user_id == grant.user_id).limit(1))).scalar()
+        if user is None:
+            user = await session.get(db.User, username)
+            if user is not None and user.cronos_user_id and user.cronos_user_id != grant.user_id:
+                await audit.record(session, "auth.login_failed", username=username,
+                                   client_ip=client_ip,
+                                   details={"via": "cronos", "why": "username linked to "
+                                            "another Cronos user"})
+                await session.commit()
+                raise cronos_auth.CronosAuthError(
+                    409, "USERNAME_TAKEN",
+                    "This username belongs to a different person in eSource. "
+                    "Ask an administrator.")
+        if user is None:
+            user = db.User(username=username, full_name=username, role=role,
+                           password_hash=CRONOS_PASSWORD, auth_source="cronos",
+                           cronos_user_id=grant.user_id)
+            session.add(user)
+            await session.flush()
+            await audit.record(session, "user.created", username="system", field=username,
+                               new_value=role, client_ip=client_ip,
+                               reason="First sign-in through Cronos",
+                               details={"cronos_user_id": grant.user_id,
+                                        "cronos_roles": grant.roles})
+        else:
+            if not is_cronos(user) or user.cronos_user_id != grant.user_id:
+                await audit.record(session, "user.updated", username="system",
+                                   field=f"{user.username}.auth_source",
+                                   old_value=user.auth_source or "local", new_value="cronos",
+                                   client_ip=client_ip, reason="Signed in through Cronos",
+                                   details={"cronos_user_id": grant.user_id})
+                user.auth_source, user.cronos_user_id = "cronos", grant.user_id
+                user.password_hash = CRONOS_PASSWORD
+            if user.role != role:
+                await audit.record(session, "user.updated", username="system",
+                                   field=f"{user.username}.role", old_value=user.role,
+                                   new_value=role, client_ip=client_ip,
+                                   reason="Role follows Cronos",
+                                   details={"cronos_roles": grant.roles})
+                user.role = role
+        if not user.active:
+            await audit.record(session, "auth.login_failed", username=user.username,
+                               client_ip=client_ip,
+                               details={"via": "cronos", "why": "disabled in eSource"})
+            await session.commit()
+            raise cronos_auth.CronosAuthError(
+                403, "DISABLED", "Your eSource access is turned off. Ask an administrator.")
+        user.last_login_at = db.utcnow()
+        user.failed_logins, user.locked_until = 0, None
+        await audit.record(session, "auth.login", username=user.username, client_ip=client_ip,
+                           details={"via": "cronos", "cronos_user_id": grant.user_id,
+                                    "cronos_roles": grant.roles})
+        await session.commit()
+        return user, grant
+
+
+async def confirm_signature(user: Any, password: str, *, client_ip: Optional[str] = None
+                            ) -> tuple[bool, Optional[Any]]:
+    """Re-authentication at the moment of signing. (ok, fresh Cronos grant or None).
+
+    Cronos accounts are checked by Cronos, whose lockout then applies; local
+    accounts by the local password and lockout. Raises Locked for a locked local
+    account and cronos_auth.CronosAuthError when Cronos can't decide."""
+    import audit
+    import cronos_auth
+
+    if not is_cronos(user):
+        ok = await authenticate(user.username, password, client_ip=client_ip,
+                                purpose="signature")
+        return ok is not None, None
+    try:
+        grant = await cronos_auth.login(user.username, password)
+    except cronos_auth.CronosAuthError as exc:
+        if exc.code in ("AUTH_INVALID_CREDENTIALS", "AUTH_ACCOUNT_LOCKED"):
+            await audit.record_now("signature.failed", username=user.username,
+                                   client_ip=client_ip,
+                                   details={"via": "cronos", "why": exc.code})
+        if exc.code == "AUTH_INVALID_CREDENTIALS":
+            return False, None
+        raise
+    if grant.user_id != user.cronos_user_id:
+        await audit.record_now("signature.failed", username=user.username, client_ip=client_ip,
+                               details={"via": "cronos", "why": "different Cronos user"})
+        return False, None
+    return True, grant
 
 
 async def authenticate(username: str, password: str, *, client_ip: Optional[str] = None,

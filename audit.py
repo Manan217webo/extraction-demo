@@ -47,6 +47,7 @@ ACTIONS = {
     "signature.applied", "signature.failed",
     "edc.submit_attempted", "edc.submitted", "edc.submit_unchanged", "edc.submit_failed",
     "audit.viewed", "audit.exported", "audit.verified",
+    "duty.denied",
     "config.changed",
 }
 

@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 import audit
 import auth
 import blobstore
+import cronos_auth
 import db
 import documents
 import esource
@@ -65,6 +66,47 @@ async def admin(request: Request) -> db.User:
     if user.role != "admin":
         raise HTTPException(403, "Only an administrator can do that.")
     return user
+
+
+def _session_token(request: Request) -> Optional[str]:
+    return request.cookies.get(auth.COOKIE_NAME)
+
+
+async def cronos_token(request: Request) -> str:
+    """The signed-in person's live Cronos access token (refreshed if needed)."""
+    import store
+    return await cronos_auth.access_token(store.get_redis(), _session_token(request),
+                                          auth.max_seconds())
+
+
+async def require_duty(request: Request, user: db.User, action: str,
+                       document: db.Document, *, fresh: bool = False
+                       ) -> Optional[cronos_auth.Right]:
+    """Refuse unless Cronos says this person holds the duty for `action` on this
+    document's study right now — in their own right or by delegation. None when
+    duties aren't enforced. Fails closed: if Cronos can't answer, nothing is saved."""
+    if not cronos_auth.enforce_duties():
+        return None
+    duty = cronos_auth.duty_for(action)
+    if not duty:
+        return None
+    if not auth.is_cronos(user):
+        raise HTTPException(403, "Local accounts can't review or sign while Cronos duties are "
+                                 "enforced. Sign in with your Cronos account.")
+    right = await cronos_auth.effective_right(await cronos_token(request), user.cronos_user_id,
+                                              duty, document.protocol_no, fresh=fresh)
+    if not right.holds:
+        await audit.record_now("duty.denied", username=user.username, document=document,
+                               client_ip=client_ip(request), field=duty, new_value=action,
+                               details=right.audit())
+        study = f" for study {document.protocol_no}" if document.protocol_no else ""
+        raise HTTPException(403, f"Cronos doesn't show the {duty} duty for you{study} today, "
+                                 "either assigned or delegated. Ask your study lead.")
+    return right
+
+
+def _duty_details(right: Optional[cronos_auth.Right]) -> dict[str, Any]:
+    return right.audit() if right else {}
 
 
 def _source_error(exc: sources.SourceError) -> HTTPException:
@@ -668,6 +710,7 @@ async def save_draft(document_id: str, body: DraftRequest, request: Request) -> 
     user = await writer(request)
     async with db.session() as session:
         document = await _document(session, document_id)
+        right = await require_duty(request, user, "review", document)
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
@@ -710,7 +753,8 @@ async def save_draft(document_id: str, body: DraftRequest, request: Request) -> 
         await audit.record(session, "draft.saved", username=user.username, document=document,
                            client_ip=client_ip(request), new_value=f"revision {draft.revision}",
                            details={"revision": draft.revision, "autosave": body.autosave,
-                                    "changes": len(changes), "payload_sha256": sha})
+                                    "changes": len(changes), "payload_sha256": sha,
+                                    **_duty_details(right)})
         await session.commit()
         return {"revision": draft.revision, "saved_at": documents.iso(draft.saved_at),
                 "changes": len(changes)}
@@ -759,9 +803,10 @@ def _blocked(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 @router.post("/docs/{document_id}/preflight")
 async def preflight(document_id: str, body: PreflightRequest, request: Request) -> dict[str, Any]:
-    await writer(request)
+    user = await writer(request)
     async with db.session() as session:
         document = await _document(session, document_id)
+        await require_duty(request, user, "submit", document)
         extraction = await esource.current_extraction(session, document.id)
     save, warnings, delta = await _fresh_save(document, extraction, body.payload, {})
     open_flags = [f.get("label") for f in documents.iter_form_fields(body.payload.get("form") or {})
@@ -797,14 +842,23 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
         raise HTTPException(422, "Choose what your signature means.")
     # Re-authentication at the moment of signing (21 CFR 11.200). A wrong
     # password counts towards the lockout but does not end the session.
+    async with db.session() as session:
+        document = await _document(session, document_id)
+    # Checked fresh (no cache) before the signature, so a revoked delegation
+    # stops the signing rather than being noticed afterwards.
+    right = await require_duty(request, user, "submit", document, fresh=True)
     try:
-        ok = await auth.authenticate(user.username, body.password, client_ip=ip,
-                                     purpose="signature")
+        ok, grant = await auth.confirm_signature(user, body.password, client_ip=ip)
     except auth.Locked as exc:
         raise HTTPException(423, f"Your account is locked until "
                                  f"{exc.until.strftime('%H:%M UTC')} after too many attempts.") from exc
     if not ok:
         raise HTTPException(403, "That password isn't right.")
+    if grant is not None:
+        # Signing re-proved the password to Cronos: keep the fresh tokens it issued.
+        import store
+        await cronos_auth.save_grant(store.get_redis(), _session_token(request), grant,
+                                     auth.max_seconds())
 
     async with db.session() as session:
         document = await _document(session, document_id)
@@ -853,6 +907,7 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                   "visit": [document.protocol_no, document.screening_no, document.visit_name],
                   "draft_revision": latest.revision, "form_sha256": sha,
                   "changes": delta["changes"],
+                  "duty": _duty_details(right),
                   "images": sorted(blobstore.sha256_of((i.get("base64Data") or "").encode())
                                    for c in save["crfs"] for i in c.get("images") or [])}
         signature = db.Signature(document_id=document.id, username=user.username,
@@ -865,7 +920,8 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                            document=document, client_ip=ip, new_value=signature.meaning,
                            details={"signature_id": signature.id,
                                     "record_sha256": signature.record_sha256,
-                                    "draft_revision": latest.revision})
+                                    "draft_revision": latest.revision,
+                                    **_duty_details(right)})
         # Written before the EDC is called: if this process dies mid-call, the
         # attempt is on record (and reconciled at start-up) rather than lost.
         pending = db.Submission(document_id=document.id, extraction_id=extraction.id,
@@ -879,7 +935,8 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                            document=document, client_ip=ip,
                            details={"changes": len(delta["changes"]),
                                     "skipped": len(delta["skipped"]),
-                                    "submission_id": pending.id})
+                                    "submission_id": pending.id,
+                                    **_duty_details(right)})
         await session.commit()
         signature_id, draft_rev, submission_id = signature.id, latest.revision, pending.id
 
@@ -892,7 +949,7 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
         try:
             response = await edc.save_visit(save)
             status = "sent"
-        except edc.EdcUnavailable as exc:
+        except (edc.EdcUnavailable, cronos_auth.CronosAuthError) as exc:
             status, error = "failed", str(exc)
         if status == "sent":
             verification = await _verify_in_edc(document, delta["changes"])
@@ -911,7 +968,8 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                            client_ip=ip, new_value=status, reason=error,
                            details={"counts": counts, "changes": delta["changes"],
                                     "signature_id": signature_id,
-                                    "verification": verification})
+                                    "verification": verification,
+                                    **_duty_details(right)})
         for change in delta["changes"] if status == "sent" else []:
             await audit.record(session, "field.changed", username=user.username,
                                document=document, client_ip=ip,
@@ -940,7 +998,7 @@ async def _verify_in_edc(document: db.Document, changes: list[dict[str, Any]]) -
     try:
         visit = await edc.get_visit(document.protocol_no, document.screening_no,
                                     document.visit_name)
-    except edc.EdcUnavailable as exc:
+    except (edc.EdcUnavailable, cronos_auth.CronosAuthError) as exc:
         return {"checked": False, "error": str(exc)}
     held: dict[tuple, Any] = {}
     for crf in visit.get("crfs") or []:
@@ -1216,9 +1274,20 @@ async def update_user(username: str, body: UserPatch, request: Request) -> dict[
             changes["active"] = (user.active, body.active)
             user.active = body.active
         if body.unlock:
+            if auth.is_cronos(user):
+                # The lockout that matters is in Cronos; unlock it there with the
+                # admin's own Cronos session.
+                if not auth.is_cronos(me):
+                    raise HTTPException(409, "Unlock Cronos accounts while signed in with a "
+                                             "Cronos admin account, or in Cronos itself.")
+                await cronos_auth.unlock(await cronos_token(request), user.username)
+                changes["cronos_lock"] = ("locked", "unlocked")
             changes["locked_until"] = (user.locked_until, None)
             user.locked_until, user.failed_logins = None, 0
         if body.password:
+            if auth.is_cronos(user):
+                raise HTTPException(409, "This person signs in through Cronos. Change their "
+                                         "password in Cronos.")
             problem = auth.password_problem(body.password, username)
             if problem:
                 raise HTTPException(422, problem)

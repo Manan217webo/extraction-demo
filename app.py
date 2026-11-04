@@ -46,6 +46,7 @@ import edc_audit
 import esource
 import pipeline
 import cronos
+import cronos_auth
 import edc
 import fields
 import local_fields
@@ -536,11 +537,34 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             request.state.user = user.username
             request.state.role = user.role
             request.state.expires_in = info["expires_in"]
+            if auth.is_cronos(user) and cronos_auth.edc_as_user():
+                # EDC calls made while serving this person carry their own Cronos token.
+                edc.use_token(lambda: cronos_auth.access_token(
+                    store.get_redis(), token, auth.max_seconds()))
         return await call_next(request)
 
 
 app.add_middleware(_AuthMiddleware)
 app.include_router(api.router)
+
+
+@app.exception_handler(cronos_auth.CronosAuthError)
+async def _cronos_error(request: Request, exc: cronos_auth.CronosAuthError) -> JSONResponse:
+    """A Cronos refusal reaches the browser as a sentence. When Cronos has ended the
+    person's session, the eSource session ends with it."""
+    response = JSONResponse({"detail": exc.message, "code": exc.code}, status_code=exc.status)
+    if exc.status == 401:
+        token = request.cookies.get(auth.COOKIE_NAME)
+        redis = store.get_redis()
+        await auth.destroy_session(redis, token)
+        await cronos_auth.drop_grant(redis, token)
+        response.delete_cookie(auth.COOKIE_NAME, path="/")
+        username = getattr(request.state, "user", None)
+        if username:
+            await audit.record_now("auth.session_expired", username=username,
+                                   client_ip=_client_ip(request),
+                                   details={"via": "cronos", "why": exc.code})
+    return response
 
 
 async def _current_user(request: Request) -> str:
@@ -604,6 +628,20 @@ def _client_ip(request: Optional[Request]) -> Optional[str]:
 @app.post("/api/login")
 async def login(body: LoginRequest, response: Response, request: Request) -> dict[str, Any]:
     username = (body.username or "").strip()
+    if username and not auth.uses_local_login(await auth.get_user(username)):
+        if not body.password:
+            raise HTTPException(status_code=401, detail="Incorrect username or password.")
+        try:
+            user, grant = await auth.sign_in_with_cronos(username, body.password,
+                                                         client_ip=_client_ip(request))
+        except cronos_auth.CronosAuthError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.message) from exc
+        redis = store.get_redis()
+        token = await auth.create_session(redis, user.username)
+        await cronos_auth.save_grant(redis, token, grant, auth.max_seconds())
+        response.set_cookie(value=token, **auth.cookie_kwargs())
+        log.info("login via cronos: %s", user.username)
+        return {**_me(user), "expires_in": auth.idle_seconds()}
     try:
         user = await auth.authenticate(username, body.password or "",
                                        client_ip=_client_ip(request)) if username else None
@@ -623,7 +661,8 @@ async def login(body: LoginRequest, response: Response, request: Request) -> dic
 
 def _me(user: Any) -> dict[str, Any]:
     return {"username": user.username, "full_name": user.full_name, "role": user.role,
-            "idle_seconds": auth.idle_seconds()}
+            "idle_seconds": auth.idle_seconds(),
+            "auth_source": "cronos" if auth.is_cronos(user) else "local"}
 
 
 @app.post("/api/logout")
@@ -631,6 +670,7 @@ async def logout(request: Request, response: Response) -> dict[str, Any]:
     token = request.cookies.get(auth.COOKIE_NAME)
     username = getattr(request.state, "user", None)
     await auth.destroy_session(store.get_redis(), token)
+    await cronos_auth.drop_grant(store.get_redis(), token)
     response.delete_cookie(auth.COOKIE_NAME, path="/")
     if username:
         await audit.record_now("auth.logout", username=username, client_ip=_client_ip(request))
@@ -640,7 +680,13 @@ async def logout(request: Request, response: Response) -> dict[str, Any]:
 @app.get("/api/me")
 async def me(request: Request) -> dict[str, Any]:
     user = await auth.get_user(await _current_user(request))
-    return {**_me(user), "expires_in": getattr(request.state, "expires_in", None)}
+    out = {**_me(user), "expires_in": getattr(request.state, "expires_in", None)}
+    if auth.is_cronos(user):
+        grant = await cronos_auth.load_grant(store.get_redis(),
+                                             request.cookies.get(auth.COOKIE_NAME))
+        out["cronos"] = ({"user_id": grant.user_id, "roles": grant.roles,
+                          "assignments": grant.assignments} if grant else None)
+    return out
 
 
 @app.post("/api/session/ping")
@@ -678,7 +724,9 @@ async def session() -> dict[str, Any]:
             "second_read": fields.read_models(True)[1],
             "preferred": fields.preferred_read(),
         },
-        "features": {"sources": bool(__import__("sources").load()),
+        "features": {"auth": "cronos" if cronos_auth.enabled() else "local",
+                     "duties_enforced": cronos_auth.enforce_duties(),
+                     "sources": bool(__import__("sources").load()),
                      "audit_delivery": "live" if edc_audit.endpoint() else "held"},
         "max_file_mb": MAX_BYTES // (1024 * 1024),
         "mapping": {

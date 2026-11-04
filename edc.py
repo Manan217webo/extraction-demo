@@ -18,12 +18,13 @@ redirect away from the endpoint *is* the "no such visit" answer.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -191,9 +192,21 @@ def configured() -> bool:
     return True
 
 
-def _headers() -> dict[str, str]:
+# Set per request when a person signed in through Cronos: their own access token,
+# fetched (and refreshed) only when a call is actually made. Unset — background
+# work, local accounts — the shared EDC_API_KEY is used.
+_user_token: contextvars.ContextVar[Optional[Callable[[], Awaitable[str]]]] = \
+    contextvars.ContextVar("edc_user_token", default=None)
+
+
+def use_token(provider: Optional[Callable[[], Awaitable[str]]]) -> None:
+    _user_token.set(provider)
+
+
+async def _headers() -> dict[str, str]:
     headers = {"Accept": "application/json"}
-    key = (os.getenv("EDC_API_KEY") or "").strip()
+    provider = _user_token.get()
+    key = (await provider()) if provider else (os.getenv("EDC_API_KEY") or "").strip()
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return headers
@@ -221,9 +234,10 @@ def _as_json(response: httpx.Response, what: str) -> Any:
 
 async def _request(method: str, path: str, **kwargs: Any) -> Any:
     url = f"{base_url()}{path}"
+    headers = await _headers()
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=False) as http:
-            response = await http.request(method, url, headers=_headers(), **kwargs)
+            response = await http.request(method, url, headers=headers, **kwargs)
     except httpx.HTTPError as exc:
         log.warning("edc %s %s failed: %s", method, path, exc)
         raise EdcUnavailable("We couldn't reach the EDC. Please try again.") from exc

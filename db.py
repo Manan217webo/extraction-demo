@@ -283,6 +283,10 @@ class User(Base):
     locked_until: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
     created_at: Mapped[dt.datetime] = mapped_column(TZDateTime(), default=utcnow)
     last_login_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
+    # "local" (password here; NULL on rows from before this column) | "cronos"
+    # (signs in through Cronos; password_hash is a placeholder that never matches).
+    auth_source: Mapped[Optional[str]] = mapped_column(String(16))
+    cronos_user_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
 
 
 Index("ix_extraction_claim", Extraction.status, Extraction.created_at)

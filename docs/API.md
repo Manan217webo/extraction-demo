@@ -22,6 +22,17 @@ Reason codes: `TRANSCRIPTION_ERROR`, `ILLEGIBLE_SOURCE`, `CORRECTED_PER_SOURCE`,
 Meanings: `REVIEWED_ACCURATE` ("I confirm these values were verified against the
 source document"), `AUTHOR` ("I am the author of these entries").
 
+### Cronos sign-in (`AUTH_MODE=cronos`)
+
+`POST /login` takes the same body but checks it with Cronos. New answers: 403 (password
+must be changed in Cronos, account inactive or expired, no eSource role), 423 (locked in
+Cronos), 429 (too many attempts), 503 (Cronos unreachable). `GET /me` adds `auth_source`
+and, for Cronos accounts, `cronos:{user_id, roles, assignments}`. Tokens stay on the server.
+Local admin accounts still sign in locally. Draft save, preflight and submit answer 403
+without the Cronos duty and 503 if Cronos can't confirm it; `duty.denied` is audited, and
+a delegated right adds `duty`, `duty_source`, `delegation_id` and `on_behalf_of` to the
+`draft.saved`, `signature.applied` and `edc.*` event details.
+
 ## Sources (file server)
 
 | Method | Path | Body → Response |
