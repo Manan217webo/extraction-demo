@@ -1367,6 +1367,15 @@ async def _ensure_visit_definition(meta: dict[str, Any], job_id: str,
     return definition
 
 
+def _refuse_unsigned_write() -> None:
+    """These older routes write to the EDC with no signature and no duty check. While
+    Cronos duties are enforced, only the signed submit (/api/docs/{id}/submit) may."""
+    if cronos_auth.enforce_duties():
+        raise HTTPException(status_code=410, detail="Submit from the review screen: sending "
+                                                    "to the EDC needs your signature and a "
+                                                    "Cronos duty.")
+
+
 @app.post("/api/documents/{job_id}/visit/save")
 async def save_visit(job_id: str, request: VisitSaveRequest,
                      http_request: Request) -> dict[str, Any]:
@@ -1504,6 +1513,7 @@ class Submission(BaseModel):
 
 @app.post("/api/cronos/submissions")
 async def submit_to_cronos(request: Submission) -> dict[str, Any]:
+    _refuse_unsigned_write()
     payload = mapping.revalidate(request.payload)
     try:
         return await cronos.get_connector().submit(

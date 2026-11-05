@@ -84,7 +84,16 @@ def duty_for(action: str) -> Optional[str]:
 
 
 _RANK = {"monitor": 1, "reviewer": 2, "admin": 3}
-_DEFAULT_ROLE_MAP = {"admin": "admin", "administrator": "admin", "investigator": "reviewer"}
+# Cronos's own role names (as the dev deployment returns them), plus the short
+# forms in its API guide. Anything not listed falls to CRONOS_DEFAULT_ROLE.
+_DEFAULT_ROLE_MAP = {
+    "super admin": "admin", "application administrator": "admin",
+    "admin": "admin", "administrator": "admin",
+    "investigators": "reviewer", "investigator": "reviewer",
+    "clinical research coordinator": "reviewer", "data entry operator": "reviewer",
+    "data manager": "reviewer", "data coordinator": "reviewer",
+    "clinical research associate": "monitor", "medical monitor": "monitor",
+}
 
 
 def role_map() -> dict[str, str]:
@@ -158,6 +167,19 @@ async def _call(method: str, path: str, *, token: Optional[str] = None,
     except httpx.HTTPError as exc:
         log.warning("cronos %s %s failed: %s", method, path, exc)
         raise CronosAuthError(503, "CRONOS_UNREACHABLE", UNREACHABLE) from exc
+    if response.is_redirect:
+        # Cronos (IIS) answers some failures with a redirect to an HTML page
+        # rather than JSON: 401.html for a spent or invalid token, 403.html for
+        # a refusal, error.html / 404.html when the request failed on its side.
+        page = (response.headers.get("location") or "").rsplit("/", 1)[-1].lower()
+        log.warning("cronos %s %s redirected to %s", method, path, page or "?")
+        if page.startswith("401"):
+            return 401, {"errorCode": "AUTH_TOKEN_INVALID"}
+        if page.startswith("403"):
+            return 403, {"errorCode": "AUTH_FORBIDDEN", "messageCode": "DD_FORBIDDEN"}
+        raise CronosAuthError(502, "CRONOS_ERROR",
+                              "Cronos had an error with this request. Please try again, and "
+                              "tell an administrator if it keeps happening.")
     try:
         body = response.json()
     except ValueError:

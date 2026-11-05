@@ -341,3 +341,73 @@ def test_signature_is_checked_by_cronos(cronos):
     assert ok and grant.user_id == "42"
     ok, grant = asyncio.run(auth.confirm_signature(user, "nope"))
     assert not ok and events("signature.failed")[-1].details["via"] == "cronos"
+
+
+# --------------------------------------------------------------------------- dev Cronos shapes
+
+
+def test_cronos_role_names_from_the_dev_deployment():
+    import cronos_auth
+    dev_user_1 = ["Application Administrator", "Clinical Research Associate",
+                  "Clinical Research Coordinator", "Data Coordinator", "Data Entry Operator",
+                  "Data Manager", "Database Designer", "Investigators", "Medical Coder",
+                  "Medical Monitor", "Super Admin", "Super User"]
+    assert cronos_auth.map_role(dev_user_1) == "admin"
+    assert cronos_auth.map_role(["Investigators"]) == "reviewer"
+    assert cronos_auth.map_role(["Data Entry Operator", "Medical Monitor"]) == "reviewer"
+    assert cronos_auth.map_role(["Clinical Research Associate"]) == "monitor"
+    assert cronos_auth.map_role(["Medical Coder"]) == "monitor"  # unmapped -> default
+
+
+def _redirecting(fake, page):
+    def handler(request):
+        path = request.url.path.removeprefix("/Cronos_Sun_EDC")
+        if path in ("/api/auth/refresh", "/api/duty-delegation/effective-rights"):
+            return httpx.Response(302, headers={"location": f"../{page}"},
+                                  text="<h1>Object Moved</h1>")
+        return fake(request)
+    return httpx.MockTransport(handler)
+
+
+def test_redirect_to_401_page_means_the_session_ended(cronos, monkeypatch):
+    fake, redis = cronos
+    import cronos_auth
+    monkeypatch.setattr(cronos_auth, "_transport", _redirecting(fake, "401.html"))
+
+    async def go():
+        grant = cronos_auth.Grant(access_token="old", refresh_token="rt-42-1",
+                                  expires_at=time.time(), user_id="42")
+        await cronos_auth.save_grant(redis, "sess", grant, 3600)
+        await cronos_auth.access_token(redis, "sess", 3600)
+    with pytest.raises(cronos_auth.CronosAuthError) as exc:
+        asyncio.run(go())
+    assert exc.value.status == 401 and "sign in again" in exc.value.message
+    with pytest.raises(cronos_auth.CronosAuthError) as exc:
+        asyncio.run(cronos_auth.effective_right("t", "42", "CRF_REVIEW", "P", fresh=True))
+    assert exc.value.status == 401
+
+
+def test_redirect_to_error_page_is_a_cronos_error_not_unreachable(cronos, monkeypatch):
+    fake, _ = cronos
+    import cronos_auth
+    monkeypatch.setattr(cronos_auth, "_transport", _redirecting(fake, "error.html"))
+    with pytest.raises(cronos_auth.CronosAuthError) as exc:
+        asyncio.run(cronos_auth.effective_right("t", "42", "CRF_REVIEW", "P", fresh=True))
+    assert exc.value.status == 502 and exc.value.code == "CRONOS_ERROR"
+    assert "couldn't reach" not in exc.value.message
+
+
+def test_redirect_to_403_page_is_a_refusal(cronos, monkeypatch):
+    fake, _ = cronos
+    import cronos_auth
+    monkeypatch.setattr(cronos_auth, "_transport", _redirecting(fake, "403.html"))
+    with pytest.raises(cronos_auth.CronosAuthError) as exc:
+        asyncio.run(cronos_auth.effective_right("t", "42", "CRF_REVIEW", "P", fresh=True))
+    assert exc.value.status == 403 and exc.value.code == "DD_FORBIDDEN"
+
+
+def test_unsigned_cronos_submissions_are_refused_while_duties_are_enforced(cronos):
+    c = client()
+    sign_in(c)
+    assert c.post("/api/cronos/submissions",
+                  json={"form_id": "x", "payload": {}}).status_code == 410
