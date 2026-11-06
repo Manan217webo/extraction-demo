@@ -119,6 +119,7 @@ def test_missing_desktop_folder_is_created(tmp_path, monkeypatch):
     entries, truncated = run(conn.list_dir(""))
     assert entries == [] and truncated is False
     assert folder.is_dir()
+    assert conn.describe() == "~/Desktop/eSource"
     (folder / "Visit 5").mkdir()
     (folder / "Visit 5" / "form.pdf").write_bytes(b"%PDF-1.4 form")
     assert [e.path for e in run(conn.walk_pdfs(""))] == ["Visit 5/form.pdf"]

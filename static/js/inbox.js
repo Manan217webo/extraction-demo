@@ -164,7 +164,7 @@
     function syncControls() {
       flaggedBtn.setAttribute("aria-pressed", String(f.flagged));
       clearBtn.hidden = !anyFilter();
-      tabs.update(tabItems(), f.status);
+      syncTabs();
     }
 
     /* ------------------------------------------------------------ data */
@@ -213,11 +213,18 @@
       });
       fillDatalist(dlProtocol, seenOptions.protocol);
       fillDatalist(dlSubject, seenOptions.subject);
-      const sig = JSON.stringify([docs, counts, total]);
-      if (sig === lastSig && listEl.querySelector("table")) return;
+      const sig = JSON.stringify([docs.map(docSig), counts, total]);
+      if (sig === lastSig && listEl.querySelector("table, .wh-empty")) return;
       lastSig = sig;
       syncControls();
       renderList();
+    }
+
+    function docSig(doc) {
+      const ex = doc.extraction || {};
+      return [doc.id, doc.status, doc.filename, doc.path, doc.screening_no, doc.visit_name,
+        doc.protocol_no, doc.confidence, doc.flags, doc.conflicts, doc.assignee, doc.updated_at,
+        ex.stage || "", ex.error || ""].join("\u001f");
     }
 
     function fillDatalist(dl, set) {
@@ -229,6 +236,15 @@
     /* ------------------------------------------------------------ list */
 
     let rowsById = new Map();
+    let tabSig = "";
+
+    function syncTabs() {
+      const items = tabItems();
+      const sig = JSON.stringify(items) + "\u001f" + f.status;
+      if (sig === tabSig) return;
+      tabSig = sig;
+      tabs.update(items, f.status);
+    }
 
     function renderList() {
       const focusedId = document.activeElement && document.activeElement.closest && document.activeElement.closest("tr[data-id]")
@@ -237,22 +253,31 @@
       resultLine.textContent = docs.length
         ? `Showing ${WH.fmt.number(docs.length)} of ${WH.fmt.plural(total, "document")}`
         : "";
-      WH.clear(listEl);
-      WH.clear(moreSlot);
-      rowsById = new Map();
 
       if (!docs.length) {
+        WH.clear(listEl);
+        WH.clear(moreSlot);
+        rowsById = new Map();
         listEl.appendChild(emptyFor());
         return;
       }
 
+      const ids = docs.map((doc) => String(doc.id)).join("\u001f");
+      const table = listEl.querySelector("table");
+      const sameRows = table && table.dataset.ids === ids;
+      if (sameRows) {
+        docs.forEach((doc) => patchRow(doc));
+        table.setAttribute("aria-rowcount", String(total));
+        paintMore();
+        return;
+      }
+
+      WH.clear(listEl);
+      WH.clear(moreSlot);
+      rowsById = new Map();
       const tbody = h("tbody");
-      docs.forEach((doc) => {
-        const row = renderRow(doc);
-        rowsById.set(String(doc.id), row);
-        tbody.appendChild(row);
-      });
-      const table = h("table", { class: "wh-table wh-inbox-table", "aria-label": "Documents", "aria-rowcount": String(total) },
+      docs.forEach((doc) => tbody.appendChild(mountRow(doc)));
+      const built = h("table", { class: "wh-table wh-inbox-table", "aria-label": "Documents", "aria-rowcount": String(total), dataset: { ids } },
         h("thead", null, h("tr", null,
           h("th", { scope: "col", class: "wh-col-status" }, "Status"),
           h("th", { scope: "col" }, "Document"),
@@ -265,17 +290,50 @@
           h("th", { scope: "col", class: "wh-col-updated" }, "Updated"),
           h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
         tbody);
-      listEl.appendChild(table);
+      listEl.appendChild(built);
 
       // Keep a selection; default to the first row so J/K work at once.
       if (!f.sel || !rowsById.has(f.sel)) f.sel = "";
       markSelected(f.sel || String(docs[0].id), { focus: false, persist: false });
       if (focusedId && rowsById.has(focusedId)) rowsById.get(focusedId).focus({ preventScroll: true });
+      paintMore();
+    }
 
-      if (docs.length < total) {
-        moreSlot.appendChild(h("button", { type: "button", class: "btn btn-quiet wh-btn wh-more-btn", onClick: () => load({ append: true }) },
-          `Load ${Math.min(PAGE, total - docs.length)} more`));
+    function mountRow(doc) {
+      const row = renderRow(doc);
+      row.dataset.sig = docSig(doc);
+      rowsById.set(String(doc.id), row);
+      return row;
+    }
+
+    /* Polls only swap a row when its fields actually changed. */
+    function patchRow(doc) {
+      const id = String(doc.id);
+      const old = rowsById.get(id);
+      const sig = docSig(doc);
+      if (old && old.dataset.sig === sig) {
+        old.doc = doc;
+        return;
       }
+      const hadFocus = old && old.contains(document.activeElement);
+      const selected = old ? old.getAttribute("aria-selected") : "false";
+      const row = mountRow(doc);
+      row.setAttribute("aria-selected", selected || "false");
+      row.tabIndex = selected === "true" ? 0 : -1;
+      if (old) old.replaceWith(row);
+      if (hadFocus) row.focus({ preventScroll: true });
+    }
+
+    function paintMore() {
+      const label = docs.length < total ? `Load ${Math.min(PAGE, total - docs.length)} more` : "";
+      const btn = moreSlot.querySelector("button");
+      if (!label) {
+        if (btn) WH.clear(moreSlot);
+        return;
+      }
+      if (btn && btn.textContent === label) return;
+      WH.clear(moreSlot);
+      moreSlot.appendChild(h("button", { type: "button", class: "btn btn-quiet wh-btn wh-more-btn", onClick: () => load({ append: true }) }, label));
     }
 
     function moreButtonBusy(on) {
@@ -450,6 +508,7 @@
       if (!old) return;
       const hadFocus = old.contains(document.activeElement);
       const row = renderRow(doc);
+      row.dataset.sig = docSig(doc);
       old.replaceWith(row);
       rowsById.set(id, row);
       markSelected(f.sel || id, { focus: hadFocus, persist: false });
@@ -471,8 +530,16 @@
     }
 
     function renderContinue(doc) {
+      if (!doc || continueDismissed) {
+        if (continueSlot.childElementCount) WH.clear(continueSlot);
+        delete continueSlot.dataset.stamp;
+        return;
+      }
+      const stamp = [doc.id, doc.filename, doc.status, doc.updated_at, doc.confidence, doc.draft_revision,
+        doc.screening_no, doc.visit_name, doc.protocol_no].join("\u001f");
+      if (continueSlot.dataset.stamp === stamp) return;
+      continueSlot.dataset.stamp = stamp;
       WH.clear(continueSlot);
-      if (!doc || continueDismissed) return;
       const meta = [doc.screening_no && `Subject ${doc.screening_no}`, doc.visit_name, doc.protocol_no].filter(Boolean).join(" · ");
       continueSlot.appendChild(
         h("section", { class: "wh-continue", "aria-label": "Continue where you left off" },

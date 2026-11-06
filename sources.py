@@ -89,7 +89,13 @@ class LocalConnector:
         self.root = Path(location).expanduser()
 
     def describe(self) -> str:
-        return str(self.root)
+        """A path another computer can use. A folder under this account's home
+        is shown as ~/Desktop/eSource, never /Users/<this account>/Desktop/eSource."""
+        try:
+            rel = self.root.relative_to(Path.home())
+        except ValueError:
+            return str(self.root)
+        return "~/" + rel.as_posix()
 
     def _ensure_root(self) -> Path:
         """The configured folder. A missing folder under this user's home is

@@ -888,9 +888,12 @@ html[data-density="compact"] .wh-doc-sub { display: none; }
 
 /* ================================================================= inbox */
 
-.wh-inbox { overflow: hidden; }
+.wh-inbox { overflow: visible; }
 .wh-inbox-list { overflow-x: auto; overscroll-behavior-x: contain; }
 .wh-inbox-table { width: max-content; min-width: 100%; }
+/* The list is its own scrollport (overflow-x). A topbar offset would shove
+   the header down onto the first row. Stick to the list instead. */
+.wh-inbox-table th { top: 0; z-index: 2; }
 
 /* ============================================================ dashboard */
 
