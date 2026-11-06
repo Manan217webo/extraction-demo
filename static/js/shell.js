@@ -191,7 +191,8 @@
   };
 
   const SECTION = {
-    inbox: { label: "Inbox", href: "#/inbox" },
+    dashboard: { label: "Dashboard", href: "#/" },
+    inbox: { label: "Reviews", href: "#/inbox" },
     sources: { label: "Sources", href: "#/sources" },
     batches: { label: "Batches", href: "#/batches" },
     audit: { label: "Audit trail", href: "#/audit" },
@@ -240,7 +241,7 @@
   }
 
   WH.bus.on("docs:counts", (counts) => {
-    if (counts && counts.ready != null) setBadge(badgeInbox, counts.ready, "ready for review");
+    if (counts && counts.ready != null) setBadge(badgeInbox, counts.ready, "ready to review");
   });
 
   /* Batch status memory, for the "finished" notification. Seeded on first
@@ -285,11 +286,7 @@
   }
   shell.refreshBadges = refreshBadges;
 
-  /* ------------------------------------------------- batch notifications */
-
-  function canNotify() {
-    return "Notification" in window;
-  }
+  /* ------------------------------------------------- batch finished */
 
   WH.bus.on("batch:finished", (batch) => {
     const counts = batch.counts || {};
@@ -309,57 +306,7 @@
         action: counts.ready ? { label: "Review", onClick: () => WH.router.go(`/batches/${batch.id}`) } : null,
       });
     }
-    if (canNotify() && Notification.permission === "granted" && (document.hidden || !document.hasFocus())) {
-      try {
-        const note = new Notification(title, { body, tag: `batch-${batch.id}`, icon: "/static/brand/whpl-logo.png" });
-        note.onclick = () => {
-          window.focus();
-          WH.router.go(`/batches/${batch.id}`);
-          note.close();
-        };
-      } catch {
-        /* some browsers only allow notifications from a service worker */
-      }
-    }
   });
-
-  /* A polite, one-time ask, shown inline where it makes sense (a running
-     batch). Never calls requestPermission without a click. */
-  shell.notifyPrompt = function () {
-    if (!canNotify() || Notification.permission !== "default" || WH.store.get("notifyAsked")) return null;
-    const card = h("div", { class: "wh-notify-ask", role: "region", "aria-label": "Desktop notifications" },
-      h("span", { class: "wh-notify-icon" }, ui.icon("bell", { size: 18 })),
-      h("div", { class: "wh-notify-copy" },
-        h("strong", null, "Want a heads-up when this finishes?"),
-        h("span", null, "We can show a desktop notification, even if this tab is in the background.")),
-      h("div", { class: "wh-notify-actions" },
-        h("button", {
-          type: "button",
-          class: "btn btn-quiet wh-btn wh-btn-sm",
-          onClick: () => {
-            WH.store.set("notifyAsked", "dismissed");
-            card.remove();
-          },
-        }, "Not now"),
-        h("button", {
-          type: "button",
-          class: "btn btn-primary wh-btn wh-btn-sm",
-          onClick: async () => {
-            WH.store.set("notifyAsked", "asked");
-            let result = "default";
-            try {
-              result = await Notification.requestPermission();
-            } catch {
-              /* older Safari */
-            }
-            card.remove();
-            ui.toast(result === "granted"
-              ? { message: "Notifications on", detail: "We'll let you know when batches finish.", kind: "success" }
-              : { message: "Notifications stay off", detail: "You can change this in your browser's site settings.", kind: "info" });
-          },
-        }, "Notify me")));
-    return card;
-  };
 
   /* ------------------------------------------------------- offline banner */
 

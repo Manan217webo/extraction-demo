@@ -114,9 +114,9 @@
     failed: { label: "Failed", icon: "x-circle", tone: "danger" },
     needs_input: { label: "Needs input", icon: "alert-circle", tone: "warn" },
     // source files
-    new: { label: "New", icon: "plus", tone: "info" },
-    processed: { label: "Processed", icon: "check", tone: "success" },
-    changed: { label: "Changed", icon: "alert-triangle", tone: "warn" },
+    new: { label: "Not scanned", icon: "plus", tone: "info" },
+    processed: { label: "Already scanned", icon: "check", tone: "success" },
+    changed: { label: "Changed on the server", icon: "alert-triangle", tone: "warn" },
     unreadable: { label: "Can't be read", icon: "ban", tone: "danger" },
     // batch items and batches
     queued: { label: "Queued", icon: "clock", tone: "neutral" },

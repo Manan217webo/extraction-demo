@@ -108,10 +108,6 @@
   async function resolve() {
     if (suspended) return;
     const parsed = parse();
-    if (parsed.path === "/" || parsed.path === "") {
-      replace("/inbox");
-      return;
-    }
     if (silentHash && silentHash === parsed.hash) {
       silentHash = null;
       return;
@@ -263,7 +259,7 @@
           icon: "search",
           title: "There's nothing at this address",
           body: "The link may be out of date, or the item was removed.",
-          action: { label: "Go to the inbox", href: "#/inbox", icon: "inbox" },
+          action: { label: "Go to the dashboard", href: "#/", icon: "home" },
         })
       );
     },
@@ -367,20 +363,26 @@
           message: "This document couldn't be opened",
           detail: (error && (error.detail || error.message)) || "",
           kind: "error",
-          action: { label: "Back to inbox", onClick: () => go("/inbox") },
+          action: { label: "Back to reviews", onClick: () => go("/inbox") },
         });
       }
     },
   });
 
-  /* The review's own "New document" button closes the viewer and shows the
-     upload landing; keep the address honest without re-running anything. */
-  window.addEventListener("wh:review-closed", () => {
+  /* The review's back button asks to land on the dashboard. Other closes
+     (opening a fresh upload) only keep the address in step. */
+  window.addEventListener("wh:review-closed", (event) => {
     if (!WH.me || !current) return;
-    if (current.def.name === "review") {
-      lastOpenedDoc = null;
-      silentReplace("/upload");
+    if (current.def.kind !== "review") return;
+    lastOpenedDoc = null;
+    if (event.detail && event.detail.reason === "home") {
+      const next = href("/");
+      skipGuardFor = next;
+      if (location.hash === next || location.hash === "" || location.hash === "#") resolve();
+      else location.replace(next);
+      return;
     }
+    if (current.def.name === "review") silentReplace("/upload");
   });
   /* Optional hook: the review screen announces the server document it has
      open (e.g. after an upload finishes). */

@@ -111,6 +111,28 @@ def test_paths_cannot_escape_the_source(tmp_path):
     assert run(conn.read("a/x.pdf")).startswith(b"%PDF")
 
 
+def test_missing_desktop_folder_is_created(tmp_path, monkeypatch):
+    import sources
+    monkeypatch.setattr(sources.Path, "home", staticmethod(lambda: tmp_path))
+    folder = tmp_path / "Desktop" / "eSource"
+    conn = sources.LocalConnector("s", "Desktop", str(folder))
+    entries, truncated = run(conn.list_dir(""))
+    assert entries == [] and truncated is False
+    assert folder.is_dir()
+    (folder / "Visit 5").mkdir()
+    (folder / "Visit 5" / "form.pdf").write_bytes(b"%PDF-1.4 form")
+    assert [e.path for e in run(conn.walk_pdfs(""))] == ["Visit 5/form.pdf"]
+
+
+def test_missing_folder_outside_home_is_not_created(tmp_path):
+    import sources
+    missing = tmp_path / "not-home"
+    conn = sources.LocalConnector("s", "Share", str(missing))
+    with pytest.raises(sources.SourceError):
+        run(conn.list_dir(""))
+    assert not missing.exists()
+
+
 # --------------------------------------------------------------------------- documents
 
 

@@ -8,9 +8,10 @@ sources.json), never from the browser:
          "location": "/mnt/fileserver/ICR-23-001/Site04"}
     ]}
 
-`kind: "local"` covers any path the server can read, which includes SMB/CIFS and
-NFS shares mounted on the host (the usual way to reach a Windows file server
-from a Linux container). Other kinds plug in by implementing `Connector`.
+`kind: "local"` covers any path the server can read. `~/Desktop/eSource` is the
+portable one: `~` is whoever is running the app, and a missing folder under
+their home is created on first look. Drop PDFs and folders in it and scan.
+An absolute path still works for an SMB/CIFS or NFS share mounted on the host.
 
 Every path that arrives from the browser is relative to a source root and is
 checked to stay inside it, symlinks included. Only PDFs are listed or read.
@@ -90,12 +91,26 @@ class LocalConnector:
     def describe(self) -> str:
         return str(self.root)
 
+    def _ensure_root(self) -> Path:
+        """The configured folder. A missing folder under this user's home is
+        created, so another computer can run the app, drop PDFs on the Desktop,
+        and scan them. A missing path outside the home is left alone."""
+        if self.root.is_dir():
+            return self.root.resolve(strict=True)
+        home = Path.home().resolve()
+        target = self.root.resolve()
+        try:
+            target.relative_to(home)
+        except ValueError as exc:
+            raise SourceError(f"The file server folder for “{self.name}” can't be reached.", 503) from exc
+        if target.exists() and not target.is_dir():
+            raise SourceError(f"“{self.name}” isn't a folder.", 503)
+        target.mkdir(parents=True, exist_ok=True)
+        return target.resolve(strict=True)
+
     def _resolve(self, rel: str) -> Path:
         rel = clean_rel(rel)
-        try:
-            root = self.root.resolve(strict=True)
-        except OSError as exc:
-            raise SourceError(f"The file server folder for “{self.name}” can't be reached.", 503) from exc
+        root = self._ensure_root()
         target = (root / rel).resolve()
         if os.path.commonpath([str(root), str(target)]) != str(root):
             raise SourceError("That path is outside the configured folder.")

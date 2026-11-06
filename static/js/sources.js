@@ -59,12 +59,12 @@
     const header = ui.pageHeader({
       eyebrow: "File server",
       title: "Sources",
-      sub: "Pick files or whole folders to read. Anything read before is checked with you first.",
-      actions: WH.can.write() ? [h("a", { class: "btn btn-quiet wh-btn", href: "#/upload" }, ui.icon("upload", { size: 16 }), "Upload a PDF")] : null,
+      sub: "Open a connected server, then a folder. Extract the visit forms inside it. A form that was already scanned asks you before it is read again.",
     });
 
+    const locationEl = h("div", { class: "wh-src-server-slot" });
     const treeEl = h("div", { class: "wh-tree-wrap" });
-    const side = h("aside", { class: "wh-src-side", "aria-label": "Folders" }, h("h2", { class: "wh-side-title" }, "Locations"), treeEl);
+    const side = h("aside", { class: "wh-src-side", "aria-label": "Folders" }, h("h2", { class: "wh-side-title" }, "Folders"), treeEl);
 
     const pathCrumbs = h("nav", { class: "wh-path", "aria-label": "Folder path" });
     const searchBox = ui.searchBox({ value: q, placeholder: "Filter this folder", label: "Filter files in this folder", onInput: (v) => {
@@ -81,7 +81,7 @@
 
     const mainPane = h("section", { class: "wh-src-main", "aria-label": "Files" }, toolbar, statusBar, notice, listEl);
     const layout = h("div", { class: "wh-src-layout wh-card" }, side, mainPane);
-    root.append(header, layout, actionBar);
+    root.append(header, locationEl, layout, actionBar);
 
     /* ------------------------------------------------------------ start */
 
@@ -92,16 +92,16 @@
         task: loadSources,
         render: (sources) => {
           if (!sources.length) {
-            layout.replaceWith(
+            locationEl.replaceWith(
               ui.emptyState({
                 icon: "database",
-                title: "No file sources are connected",
+                title: "No file server is connected",
                 body: WH.can.admin()
-                  ? "Add a file-server location in the server configuration, then come back here to scan it."
-                  : "Ask an administrator to connect a file-server location.",
-                secondary: WH.can.write() ? { label: "Upload a single PDF instead", href: "#/upload", icon: "upload" } : null,
+                  ? "Add a server location in the server configuration. Its folders and visit forms will show up here."
+                  : "Ask an administrator to connect a file-server location. Its folders and visit forms will show up here.",
               })
             );
+            layout.remove();
             return;
           }
           if (!sourceId || !sources.some((s) => String(s.id) === String(sourceId))) {
@@ -308,6 +308,29 @@
             : h("button", { type: "button", class: "wh-path-link", onClick: () => openFolder(c.path) }, c.name || (src && src.name) || "Root")));
       });
       pathCrumbs.appendChild(ol);
+      renderLocation();
+    }
+
+    function renderLocation() {
+      const src = (sourcesCache || []).find((s) => String(s.id) === String(sourceId));
+      if (!src) return;
+      const files = listing ? listing.entries.filter((e) => e.type === "pdf") : [];
+      const folders = listing ? listing.entries.filter((e) => e.type === "dir") : [];
+      const scanned = files.filter((e) => e.status === "processed" || e.status === "changed").length;
+      const fresh = files.filter((e) => !e.status || e.status === "new").length;
+      WH.clear(locationEl).appendChild(
+        h("div", { class: "wh-src-server" },
+          h("span", { class: "wh-src-server-mark", "aria-hidden": "true" }, ui.icon("database", { size: 20 })),
+          h("div", { class: "wh-src-server-copy" },
+            h("span", { class: "wh-eyebrow" }, "Connected server"),
+            h("strong", null, src.name),
+            src.location && h("span", { class: "wh-src-server-path", title: src.location }, src.location)),
+          listing && h("dl", { class: "wh-src-server-counts" },
+            folders.length ? [h("div", null, h("dt", null, "Folders"), h("dd", null, String(folders.length)))] : null,
+            files.length ? [h("div", null, h("dt", null, "Visit forms"), h("dd", null, String(files.length)))] : null,
+            fresh ? [h("div", null, h("dt", null, "Not scanned"), h("dd", null, String(fresh)))] : null,
+            scanned ? [h("div", null, h("dt", null, "Already scanned"), h("dd", null, String(scanned)))] : null))
+      );
     }
 
     /* -------------------------------------------------------------- list */
@@ -321,6 +344,13 @@
         if (statusFilter !== "all" && e.type === "dir") return false;
         return true;
       });
+    }
+
+    function fileEntries() {
+      return visibleEntries().filter((e) => e.type !== "dir");
+    }
+    function folderEntries() {
+      return visibleEntries().filter((e) => e.type === "dir");
     }
 
     function coveringFolder(entryPath) {
@@ -364,15 +394,16 @@
         notice.appendChild(h("p", { class: "wh-inline-note wh-inline-note--warn" }, ui.icon("alert-triangle", { size: 15 }),
           "This folder is large, so only part of it is listed. Selecting the folder still includes every PDF inside it."));
       }
-      const entries = visibleEntries();
+      const folders = folderEntries();
+      const files = fileEntries();
       WH.clear(listEl);
       if (!listing) return;
       if (!listing.entries.length) {
-        listEl.appendChild(ui.emptyState({ icon: "folder-open", title: "This folder is empty", body: "No PDFs or subfolders here.", compact: true }));
+        listEl.appendChild(ui.emptyState({ icon: "folder-open", title: "This folder is empty", body: "Add PDFs or folders on the computer at the path above, then refresh. They show up here to scan.", compact: true }));
         renderActionBar();
         return;
       }
-      if (!entries.length) {
+      if (!folders.length && !files.length) {
         listEl.appendChild(ui.emptyState({
           icon: "search",
           title: "Nothing matches",
@@ -390,12 +421,22 @@
         return;
       }
 
-      const selectable = entries.filter((e) => !coveringFolder(e.path));
+      if (folders.length) {
+        listEl.appendChild(h("section", { class: "wh-src-folders", "aria-label": "Folders" },
+          h("h3", null, "Folders"),
+          h("ul", null, folders.map((entry) => renderFolder(entry)))));
+      }
+      if (!files.length) {
+        renderActionBar();
+        return;
+      }
+
+      const selectable = files.filter((e) => !coveringFolder(e.path));
       const selectedHere = selectable.filter((e) => selection.has(e.path)).length;
       const headBox = h("input", {
         type: "checkbox",
         class: "wh-check",
-        "aria-label": "Select everything shown",
+        "aria-label": "Select every visit form shown",
         checked: selectable.length > 0 && selectedHere === selectable.length,
         indeterminate: selectedHere > 0 && selectedHere < selectable.length,
         disabled: !WH.can.write() || !selectable.length,
@@ -406,20 +447,46 @@
       });
 
       const tbody = h("tbody");
-      entries.forEach((entry, index) => tbody.appendChild(renderEntry(entry, index)));
-      listEl.appendChild(h("table", { class: "wh-table wh-src-table", "aria-label": "Files and folders" },
-        h("thead", null, h("tr", null,
-          h("th", { class: "wh-col-check", scope: "col" }, headBox),
-          h("th", { scope: "col" }, "Name"),
-          h("th", { scope: "col" }, "Status"),
-          h("th", { scope: "col", class: "wh-col-num" }, "Size"),
-          h("th", { scope: "col" }, "Modified"),
-          h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
-        tbody));
+      files.forEach((entry, index) => tbody.appendChild(renderEntry(entry, index)));
+      listEl.appendChild(h("section", { class: "wh-src-files" },
+        h("h3", null, "Visit forms"),
+        h("table", { class: "wh-table wh-src-table", "aria-label": "Visit forms" },
+          h("thead", null, h("tr", null,
+            h("th", { class: "wh-col-check", scope: "col" }, headBox),
+            h("th", { scope: "col" }, "Name"),
+            h("th", { scope: "col" }, "Status"),
+            h("th", { scope: "col", class: "wh-col-num" }, "Size"),
+            h("th", { scope: "col" }, "Modified"),
+            h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
+          tbody)));
       const rows = tbody.querySelectorAll("tr");
       if (rows[focusIndex]) rows[focusIndex].tabIndex = 0;
       else if (rows[0]) rows[0].tabIndex = 0;
       renderActionBar();
+    }
+
+    function renderFolder(entry) {
+      const covered = coveringFolder(entry.path);
+      const checked = Boolean(covered) || selection.has(entry.path);
+      return h("li", null,
+        h("div", { class: ["wh-src-folder", checked && "is-checked"] },
+          WH.can.write() && h("input", {
+            type: "checkbox",
+            class: "wh-check",
+            checked,
+            disabled: Boolean(covered),
+            "aria-label": `Select ${entry.name} and everything in it`,
+            title: covered ? "Included because its folder is selected" : "Scan everything in this folder",
+            onClick: (event) => event.stopPropagation(),
+            onChange: (event) => {
+              setSelected(entry, event.target.checked);
+              commitSelection();
+            },
+          }),
+          h("button", { type: "button", class: "wh-src-folder-open", onClick: () => openFolder(entry.path) },
+            ui.icon("folder", { size: 22 }),
+            h("span", null, entry.name),
+            h("span", { class: "wh-src-folder-go" }, "Open", ui.icon("chevron-right", { size: 14 })))));
     }
 
     function renderEntry(entry, index) {
@@ -439,22 +506,38 @@
           toggleAt(index, event.shiftKey, event.target.checked);
         },
       });
-      const nameCell = isDir
-        ? h("button", { type: "button", class: "wh-entry-name is-dir", tabindex: "-1", onClick: (event) => {
+      const nameCell = h("span", { class: "wh-entry-name" }, ui.icon("pdf", { size: 18 }), h("span", null, entry.name));
+      const openHref = entry.document_id == null
+        ? null
+        : entry.status === "processed" || entry.status === "changed"
+          ? `#/review/${encodeURIComponent(entry.document_id)}`
+          : `#/doc/${encodeURIComponent(entry.document_id)}/history`;
+      const scanned = entry.status === "processed" || entry.status === "changed" || entry.status === "failed";
+      const action = h("div", { class: "wh-src-actions" },
+        openHref && h("a", {
+          class: "btn btn-quiet wh-btn wh-btn-sm",
+          tabindex: "-1",
+          href: openHref,
+          onClick: (event) => event.stopPropagation(),
+        }, "Open"),
+        WH.can.write() && scanned && h("button", {
+          type: "button",
+          class: "btn btn-quiet wh-btn wh-btn-sm",
+          tabindex: "-1",
+          onClick: (event) => {
             event.stopPropagation();
-            openFolder(entry.path);
-          } }, ui.icon("folder", { size: 18 }), h("span", null, entry.name))
-        : h("span", { class: "wh-entry-name" }, ui.icon("pdf", { size: 18 }), h("span", null, entry.name));
-
-      const action = !isDir && entry.document_id != null
-        ? h("a", {
-            class: "wh-icon-btn wh-icon-btn--sm",
-            tabindex: "-1",
-            href: entry.status === "processed" ? `#/review/${encodeURIComponent(entry.document_id)}` : `#/doc/${encodeURIComponent(entry.document_id)}/history`,
-            "aria-label": `Open ${entry.name}`,
-            title: entry.status === "processed" ? "Open review" : "Open history",
-          }, ui.icon("external", { size: 15 }))
-        : isDir ? h("span", { class: "wh-entry-go", "aria-hidden": "true" }, ui.icon("chevron-right", { size: 16 })) : null;
+            scanOne(entry);
+          },
+        }, "Scan again"),
+        WH.can.write() && !scanned && entry.status !== "processing" && h("button", {
+          type: "button",
+          class: "btn btn-primary wh-btn wh-btn-sm",
+          tabindex: "-1",
+          onClick: (event) => {
+            event.stopPropagation();
+            scanOne(entry);
+          },
+        }, "Extract"));
 
       const row = h("tr", {
         class: ["wh-row", checked && "is-checked", covered && "is-covered"],
@@ -462,11 +545,7 @@
         dataset: { index: String(index) },
         "aria-selected": String(checked),
         onClick: (event) => {
-          if (event.target.closest("a, input")) return;
-          if (isDir && !event.shiftKey && !event.target.closest(".wh-col-check")) {
-            openFolder(entry.path);
-            return;
-          }
+          if (event.target.closest("a, input, button")) return;
           if (!covered && WH.can.write()) toggleAt(index, event.shiftKey, !selection.has(entry.path));
         },
         onKeydown: (event) => onRowKey(event, entry, index),
@@ -503,8 +582,7 @@
         if (!coveringFolder(entry.path) && WH.can.write()) toggleAt(index, event.shiftKey, !selection.has(entry.path));
       } else if (event.key === "Enter") {
         event.preventDefault();
-        if (entry.type === "dir") openFolder(entry.path);
-        else if (entry.document_id != null) WH.router.go(`/review/${entry.document_id}`);
+        if (entry.document_id != null) WH.router.go(`/review/${entry.document_id}`);
       } else if (event.key === "Backspace" && listing && path) {
         event.preventDefault();
         openFolder(listing.parent || "");
@@ -523,7 +601,7 @@
     }
 
     function toggleAt(index, shift, on) {
-      const entries = visibleEntries();
+      const entries = fileEntries();
       const entry = entries[index];
       if (!entry) return;
       if (shift && anchorIndex != null) {
@@ -588,8 +666,9 @@
         h("div", { class: "wh-actionbar-inner" },
           h("span", { class: "wh-actionbar-count" }, h("strong", null, WH.fmt.number(selection.size)), " selected"),
           h("span", { class: "wh-actionbar-detail" },
-            [summary.files && WH.fmt.plural(summary.files, "file"), summary.folders && `${WH.fmt.plural(summary.folders, "folder")} (everything inside)`].filter(Boolean).join(" · "),
-            parts.length ? ` — ${parts.join(", ")}` : ""),
+            [summary.files && WH.fmt.plural(summary.files, "visit form"), summary.folders && `${WH.fmt.plural(summary.folders, "folder")} (everything inside)`].filter(Boolean).join(" · "),
+            parts.length ? ` — ${parts.join(", ")}` : "",
+            (summary.statuses.processed || summary.statuses.changed) ? " · already scanned ones ask first" : ""),
           h("span", { class: "wh-grow" }),
           h("button", { type: "button", class: "btn btn-quiet wh-btn", onClick: () => {
             selection.clear();
@@ -602,6 +681,14 @@
     }
 
     /* -------------------------------------------------------------- scan */
+
+    async function scanOne(entry) {
+      knownEntries.set(entry.path, entry);
+      selection = new Set([entry.path]);
+      WH.router.setQuery({ sel: [entry.path] });
+      renderList();
+      await scan();
+    }
 
     async function scan() {
       const btn = document.getElementById("wh-scan-btn");
@@ -642,7 +729,7 @@
         message: `Batch #${batch.number || batch.id} started`,
         detail: [
           `${WH.fmt.plural(batch.total != null ? batch.total : files.length, "file")} queued`,
-          reprocessed && `${reprocessed} reprocessed`,
+          reprocessed && `${reprocessed} scanned again`,
           batch.skipped && `${batch.skipped} skipped`,
         ].filter(Boolean).join(" · "),
       });
@@ -665,7 +752,7 @@
       });
       const decidable = [...groups.changed, ...groups.processed];
 
-      const reason = ui.reasonField({ label: "Why reprocess?", picks: REPROCESS_PICKS });
+      const reason = ui.reasonField({ label: "Why scan again?", picks: REPROCESS_PICKS });
       const reasonWrap = h("div", { class: "wh-dup-reason" }, reason.el);
       const summary = h("p", { class: "wh-dup-summary", "aria-live": "polite" });
       const segs = new Map();
@@ -686,8 +773,8 @@
             size: "sm",
             value: decisions.get(f.path),
             items: [
-              { value: "skip", label: "Skip" },
-              { value: "reprocess", label: "Reprocess" },
+              { value: "skip", label: "Keep the last scan" },
+              { value: "reprocess", label: "Scan again" },
             ],
             onChange: (v) => {
               decisions.set(f.path, v);
@@ -705,7 +792,7 @@
               f.error && h("span", { class: "wh-dup-error" }, f.error),
               f.size != null && h("span", { class: "wh-muted" }, WH.fmt.bytes(f.size))),
             prior && prior.submitted && h("span", { class: "wh-dup-warn" }, ui.icon("check-seal", { size: 14 }),
-              "Already submitted to the EDC. Reprocessing makes a new version; the EDC keeps the submitted values until someone reviews and submits again."),
+              "Already submitted to the EDC. Scanning again makes a new version here. The EDC keeps the submitted values until someone reviews and submits again."),
             h("span", { class: "wh-dup-path", title: f.path }, f.path)),
           control);
       }
@@ -720,8 +807,8 @@
 
       const bulk = decidable.length > 1
         ? h("div", { class: "wh-dup-bulk", role: "group", "aria-label": "Decide for all" },
-            h("button", { type: "button", class: "btn btn-quiet wh-btn wh-btn-sm", onClick: () => setAll("skip") }, "Skip all"),
-            h("button", { type: "button", class: "btn btn-quiet wh-btn wh-btn-sm", onClick: () => setAll("reprocess") }, "Reprocess all"))
+            h("button", { type: "button", class: "btn btn-quiet wh-btn wh-btn-sm", onClick: () => setAll("skip") }, "Keep all"),
+            h("button", { type: "button", class: "btn btn-quiet wh-btn wh-btn-sm", onClick: () => setAll("reprocess") }, "Scan all again"))
         : null;
       function setAll(v) {
         decidable.forEach((f) => {
@@ -741,15 +828,15 @@
       const body = h("div", { class: "wh-dup" },
         h("div", { class: "wh-dup-top" }, summary, bulk),
         newNote,
-        section("Changed since the last read", "The file on the server is different from the one read before. Reprocessing is suggested.", groups.changed),
-        section("Already read", "Same file as before. Skipping is suggested; a skip is recorded in the audit trail.", groups.processed),
+        section("Changed on the server", "The file is different from the one scanned before. Scanning again is suggested.", groups.changed),
+        section("Already scanned", "Same file as the last scan. Keeping it is suggested, and that choice is recorded in the audit trail.", groups.processed),
         section("Being read right now", null, groups.processing, "processing"),
         section("Can't be read", "These files are damaged or not real PDFs.", groups.unreadable, "unreadable"),
         reasonWrap);
 
       const layer = ui.modal({
-        title: "Some of these were read before",
-        description: "Choose what happens to each one. Nothing is sent to the EDC from here.",
+        title: decidable.length === 1 && !groups.new.length ? "This visit was already scanned" : "Some of these were already scanned",
+        description: "Keep the last scan, or scan again. Nothing is sent to the EDC from here.",
         size: "lg",
         body,
         actions: [
@@ -782,15 +869,15 @@
         const btn = layer.button("go");
         const label = btn.querySelector(".wh-btn-label");
         let text;
-        if (n && reprocess) text = `Scan ${n} new + ${reprocess} reprocess`;
+        if (n && reprocess) text = `Scan ${n} new + ${reprocess} again`;
         else if (n) text = `Scan ${n} new`;
-        else if (reprocess) text = `Reprocess ${reprocess}`;
+        else if (reprocess) text = `Scan ${reprocess} again`;
         else text = "Nothing to scan";
         label.textContent = text;
         btn.disabled = !n && !reprocess;
         summary.textContent = [
           n && `${WH.fmt.plural(n, "new file")} to read`,
-          reprocess && `${reprocess} to reprocess`,
+          reprocess && `${reprocess} to scan again`,
           skip && `${skip} skipped`,
         ].filter(Boolean).join(" · ") || "Everything is skipped.";
       }

@@ -1,10 +1,10 @@
 {
   "sources": [
     {
-      "id": "icr23-site04",
-      "name": "ICR-23-001 · Site 04",
+      "id": "desktop",
+      "name": "eSource",
       "kind": "local",
-      "location": "/sources/ICR-23-001/Site04"
+      "location": "~/Desktop/eSource"
     }
   ]
 }

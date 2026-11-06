@@ -36,6 +36,7 @@
     <script defer src="/static/js/router.js"></script>
     <script defer src="/static/js/shell.js"></script>
     <script defer src="/static/js/palette.js"></script>
+    <script defer src="/static/js/dashboard.js"></script>
     <script defer src="/static/js/inbox.js"></script>
     <script defer src="/static/js/sources.js"></script>
     <script defer src="/static/js/batches.js"></script>
@@ -125,7 +126,7 @@
             </div>
           </div>
           <p id="login-error" class="login-error hidden" role="alert"></p>
-          <button type="submit" class="btn btn-primary btn-lg" id="login-submit">Sign in</button>
+          <button type="submit" class="btn btn-primary btn-lg" id="login-submit"><span class="wh-btn-label">Sign in</span></button>
         </form>
       </div>
       <aside class="login-aside">
@@ -138,14 +139,14 @@
     <div class="wh-app" id="app-shell">
       <nav class="wh-sidenav" id="sidenav" aria-label="Main">
         <ul class="wh-nav-list">
-          <li><a class="wh-nav-link" href="#/inbox" data-nav="inbox"><span class="wh-nav-icon" data-icon="inbox"></span><span class="wh-nav-label">Inbox</span><span class="wh-nav-badge" id="badge-inbox" hidden></span></a></li>
-          <li data-feature="sources"><a class="wh-nav-link" href="#/sources" data-nav="sources"><span class="wh-nav-icon" data-icon="folder"></span><span class="wh-nav-label">Sources</span></a></li>
+          <li><a class="wh-nav-link" href="#/" data-nav="dashboard"><span class="wh-nav-icon" data-icon="home"></span><span class="wh-nav-label">Dashboard</span></a></li>
+          <li><a class="wh-nav-link" href="#/sources" data-nav="sources"><span class="wh-nav-icon" data-icon="folder"></span><span class="wh-nav-label">Sources</span></a></li>
+          <li><a class="wh-nav-link" href="#/inbox" data-nav="inbox"><span class="wh-nav-icon" data-icon="file"></span><span class="wh-nav-label">Reviews</span><span class="wh-nav-badge" id="badge-inbox" hidden></span></a></li>
           <li><a class="wh-nav-link" href="#/batches" data-nav="batches"><span class="wh-nav-icon" data-icon="layers"></span><span class="wh-nav-label">Batches</span><span class="wh-nav-badge wh-nav-badge--live" id="badge-batches" hidden></span></a></li>
           <li><a class="wh-nav-link" href="#/audit" data-nav="audit"><span class="wh-nav-icon" data-icon="shield"></span><span class="wh-nav-label">Audit</span></a></li>
           <li data-role="admin" hidden><a class="wh-nav-link" href="#/admin" data-nav="admin"><span class="wh-nav-icon" data-icon="users"></span><span class="wh-nav-label">Admin</span></a></li>
         </ul>
         <div class="wh-nav-foot">
-          <a class="wh-nav-link wh-nav-upload" href="#/upload" data-nav="upload" data-write><span class="wh-nav-icon" data-icon="upload"></span><span class="wh-nav-label">Upload a PDF</span></a>
           <button type="button" class="wh-nav-link wh-nav-collapse" id="nav-collapse" aria-pressed="false"><span class="wh-nav-icon" data-icon="panel-left"></span><span class="wh-nav-label">Collapse sidebar</span></button>
         </div>
       </nav>
@@ -293,7 +294,7 @@
                 <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
                   <path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
-                New document
+                Dashboard
               </button>
 
               <div class="vb-title">
@@ -366,7 +367,6 @@
               <div class="pane-head">
                 <div class="pane-head-title">
                   <span>Original document</span>
-                  <span id="pdf-accuracy" class="pdf-accuracy hidden"></span>
                 </div>
                 <label class="region-toggle" id="region-toggle-wrap" hidden>
                   <input type="checkbox" id="region-toggle" checked />

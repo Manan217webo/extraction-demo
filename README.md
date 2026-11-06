@@ -65,7 +65,7 @@ Then, in the project folder:
 uv sync                     # creates .venv from uv.lock
 cp .env.example .env        # Windows: copy .env.example .env
 docker compose up -d redis  # login sessions and job meta
-cp sources.example.json sources.json   # file-server folders to scan from
+cp sources.example.json sources.json   # scans ~/Desktop/eSource; created if missing
 uv run scripts/add_user.py alice --full-name "Alice Ng" --role admin
 ```
 

@@ -56,7 +56,6 @@ const els = {
   paneSplit: $("pane-split"),
   pdfScroll: $("pdf-scroll"),
   originalEmpty: $("original-empty"),
-  pdfAccuracy: $("pdf-accuracy"),
   regionToggle: $("region-toggle"),
   regionToggleWrap: $("region-toggle-wrap"),
   regionCount: $("region-count"),
@@ -162,14 +161,6 @@ marked.setOptions({ gfm: true, breaks: true });
 /* ----------------------------------------------------------------- helpers */
 
 const fmt = (n) => Number(n || 0).toLocaleString("en-US");
-
-function pdfAccuracy(result) {
-  const existing = result && Number(result.pdf_accuracy);
-  if (existing >= 95 && existing <= 98) return Math.round(existing);
-  const value = 95 + Math.floor(Math.random() * 4);
-  if (result) result.pdf_accuracy = value;
-  return value;
-}
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -620,12 +611,8 @@ function showResult(data, landing, options = {}) {
 
   els.resultTitle.textContent = data.filename || "Extracted document";
   els.resultChips.innerHTML = "";
-  const accuracy = pdfAccuracy(data);
-  els.pdfAccuracy.textContent = `${accuracy}% PDF accuracy`;
-  els.pdfAccuracy.classList.remove("hidden");
   const chips = [
     data.page_count ? `${data.page_count} page${data.page_count === 1 ? "" : "s"}` : null,
-    `${accuracy}% PDF accuracy`,
     mode ? mode.name : null,
     data.credits_used != null ? `${fmt(Math.round(data.credits_used))} credits used` : null,
     data.elapsed_seconds != null ? `${data.elapsed_seconds}s` : null,
@@ -633,7 +620,6 @@ function showResult(data, landing, options = {}) {
   chips.forEach((text) => {
     const chip = document.createElement("span");
     chip.textContent = text;
-    if (text.includes("PDF accuracy")) chip.className = "good";
     els.resultChips.appendChild(chip);
   });
   els.extractedNote.textContent = "Always check against the original";
@@ -699,7 +685,7 @@ function resetReviewIdentity() {
   if (state.readOnly) setReadOnly(false);
 }
 
-function closeViewer() {
+function closeViewer(reason) {
   const layer = edc();
   // Never lose a pending draft on the way out: send it now rather than ask.
   if (layer && layer.flush) layer.flush();
@@ -726,7 +712,7 @@ function closeViewer() {
   setFile(null);
   renderRecentMenu().catch(() => {});
   window.scrollTo({ top: 0, behavior: "smooth" });
-  window.dispatchEvent(new CustomEvent("wh:review-closed"));
+  window.dispatchEvent(new CustomEvent("wh:review-closed", { detail: reason ? { reason } : null }));
 }
 
 function setLayout(layout) {
@@ -3104,7 +3090,7 @@ els.errorRetry.addEventListener("click", () => {
   runExtraction();
 });
 
-els.viewerBack.addEventListener("click", closeViewer);
+els.viewerBack.addEventListener("click", () => closeViewer("home"));
 els.layoutToggle.addEventListener("click", (event) => {
   const btn = event.target.closest("button[data-layout]");
   if (btn) setLayout(btn.dataset.layout);
@@ -3305,7 +3291,11 @@ $("login-reveal").addEventListener("click", () => {
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   els.loginError.classList.add("hidden");
+  const label = els.loginSubmit.querySelector(".wh-btn-label");
   els.loginSubmit.disabled = true;
+  els.loginSubmit.classList.add("is-busy");
+  els.loginSubmit.setAttribute("aria-busy", "true");
+  if (label) label.textContent = "Signing in";
   try {
     const data = await api("/api/login", {
       method: "POST",
@@ -3330,6 +3320,9 @@ els.loginForm.addEventListener("submit", async (event) => {
     }
   } finally {
     els.loginSubmit.disabled = false;
+    els.loginSubmit.classList.remove("is-busy");
+    els.loginSubmit.removeAttribute("aria-busy");
+    if (label) label.textContent = "Sign in";
   }
 });
 

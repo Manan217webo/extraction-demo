@@ -3,7 +3,7 @@
    A list of scan batches and a detail view with each file's pipeline stage
    as dots (render → header → visit → read → done), an overall progress bar
    with an ETA, cancel, retry and "Review →". Polls every 2s while a batch
-   runs; the shell raises a desktop notification when one finishes. */
+   runs, and the screen redraws only when a file's status changes. */
 
 (function () {
   "use strict";
@@ -138,11 +138,11 @@
 
     const headSlot = h("div");
     const summarySlot = h("div");
-    const askSlot = h("div");
     const doneSlot = h("div", { "aria-live": "polite" });
     const filterSlot = h("div", { class: "wh-status-filter", role: "group", "aria-label": "Show files by status" });
     const itemsEl = h("div", { class: "wh-card wh-batch-items" });
-    const body = h("div", { class: "wh-batch-detail" }, summarySlot, askSlot, doneSlot, filterSlot, itemsEl);
+    const body = h("div", { class: "wh-batch-detail" }, summarySlot, doneSlot, filterSlot, itemsEl);
+    let viewSig = "";
     root.append(headSlot, body);
 
     headSlot.appendChild(ui.pageHeader({ eyebrow: "Batch", title: "Loading batch…" }));
@@ -156,7 +156,7 @@
           task,
           label: "this batch",
           render: (data) => {
-            body.append(summarySlot, askSlot, doneSlot, filterSlot, itemsEl);
+            body.append(summarySlot, doneSlot, filterSlot, itemsEl);
             apply(data);
           },
           onError: (error) => {
@@ -180,6 +180,13 @@
       if (wasRunning === true && !running) celebrate();
       wasRunning = running;
       if (poller) poller.setInterval(running ? 2000 : 30000);
+      const sig = JSON.stringify({
+        done: batch.done, cancelled: batch.cancelled, total: batch.total, skipped: batch.skipped,
+        counts: batch.counts,
+        items: items.map((i) => [i.extraction_id, i.status, i.stage, i.error, i.document_id]),
+      });
+      if (sig === viewSig) return;
+      viewSig = sig;
       render();
     }
 
@@ -206,7 +213,6 @@
       if (focused) headSlot.querySelector("h1").focus({ preventScroll: true });
 
       renderSummary();
-      renderAsk();
       renderFilter();
       renderItems();
     }
@@ -257,13 +263,6 @@
       return `About ${WH.fmt.duration(Math.round(seconds / 60) * 60)} left`;
     }
 
-    function renderAsk() {
-      WH.clear(askSlot);
-      if (!isRunning(batch)) return;
-      const prompt = WH.shell.notifyPrompt();
-      if (prompt) askSlot.appendChild(prompt);
-    }
-
     function celebrate() {
       const c = batch.counts || {};
       WH.clear(doneSlot).appendChild(
@@ -272,7 +271,7 @@
           h("div", null,
             h("strong", null, batch.cancelled ? "Batch cancelled" : "Batch finished"),
             h("span", null, [c.ready && `${c.ready} ready for review`, c.needs_input && `${c.needs_input} need input`, c.failed && `${c.failed} failed`].filter(Boolean).join(" · ") || "Nothing left to do.")),
-          c.ready ? h("a", { class: "btn btn-primary wh-btn wh-btn-sm", href: "#/inbox?status=ready" }, "Open the inbox") : null));
+          c.ready ? h("a", { class: "btn btn-primary wh-btn wh-btn-sm", href: "#/inbox?status=ready" }, "Open reviews") : null));
       WH.announce("Batch finished");
     }
 

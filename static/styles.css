@@ -122,7 +122,8 @@ button, input, select { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
-  z-index: 30;
+  /* Above the review surface (50) so menus drop over it; under processing (60) and dialogs. */
+  z-index: 55;
 }
 .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .brand img { width: 124px; display: block; }
@@ -323,6 +324,9 @@ body.signed-out .topbar-right { visibility: hidden; }
   font-weight: 600;
 }
 .login-card .btn-lg { width: 100%; margin-top: 2px; }
+.login-overlay .login-card .btn-primary.is-busy,
+.login-overlay .login-card .btn-primary.is-busy .wh-btn-label { color: #fff !important; }
+.login-card .btn.is-busy:disabled { opacity: 1; cursor: wait; }
 
 @media (max-width: 860px) {
   .login-overlay { grid-template-columns: 1fr; }
@@ -774,9 +778,10 @@ body.booting .processing { visibility: hidden; }
 .vb-row { display: flex; align-items: center; gap: 14px; padding: 11px 18px; }
 .vb-top { border-bottom: 1px solid var(--line); }
 .btn-back { flex: none; }
-.vb-title { flex: 1; min-width: 0; }
+.vb-title { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
 .vb-title h2 {
   margin: 0;
+  min-width: 0;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: -0.02em;
@@ -784,7 +789,7 @@ body.booting .processing { visibility: hidden; }
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
+.chips { display: flex; gap: 6px; flex: none; flex-wrap: nowrap; margin-top: 0; }
 .chips span {
   font-size: 10.5px;
   font-weight: 600;
@@ -794,20 +799,7 @@ body.booting .processing { visibility: hidden; }
   border-radius: 999px;
   padding: 2px 9px;
 }
-.chips span.good { color: #1e7d5e; background: #eefaf5; border-color: #c3ecdd; }
 .pane-head-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.pdf-accuracy {
-  font-size: 10.5px;
-  font-weight: 700;
-  text-transform: none;
-  letter-spacing: 0;
-  color: #1e7d5e;
-  background: #eefaf5;
-  border: 1px solid #c3ecdd;
-  border-radius: 999px;
-  padding: 2px 9px;
-  white-space: nowrap;
-}
 .vb-actions { display: flex; gap: 8px; align-items: center; flex: none; }
 
 .menu-wrap { position: relative; }

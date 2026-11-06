@@ -15,11 +15,11 @@
   /* ---------------------------------------------------------- commands */
 
   const GOTO = [
-    { key: "i", label: "Inbox", path: "/inbox", icon: "inbox", keywords: "worklist documents queue" },
-    { key: "s", label: "Sources", path: "/sources", icon: "folder", keywords: "file server folders scan", feature: "sources" },
+    { key: "d", label: "Dashboard", path: "/", icon: "home", keywords: "home start landing overview" },
+    { key: "i", label: "Reviews", path: "/inbox", icon: "file", keywords: "worklist documents queue inbox reviews" },
+    { key: "s", label: "Sources", path: "/sources", icon: "folder", keywords: "file server folders scan visit forms" },
     { key: "b", label: "Batches", path: "/batches", icon: "layers", keywords: "jobs runs progress" },
     { key: "a", label: "Audit trail", path: "/audit", icon: "shield", keywords: "log history events compliance" },
-    { key: "u", label: "Upload a PDF", path: "/upload", icon: "upload", keywords: "new document file", write: true },
     { key: "m", label: "Admin · Users", path: "/admin", icon: "users", keywords: "users roles accounts", admin: true },
   ];
 
@@ -48,7 +48,7 @@
     ].map(([status, label, icon]) => ({
       id: `inbox-${status}`,
       group: "Go to",
-      label: `Inbox · ${label}`,
+      label: `Reviews · ${label}`,
       icon,
       keywords: `inbox filter ${status}`,
       run: () => WH.router.go("/inbox", { status }),
@@ -56,7 +56,7 @@
     inboxViews.push({
       id: "inbox-mine",
       group: "Go to",
-      label: "Inbox · Assigned to me",
+      label: "Reviews · Assigned to me",
       icon: "user",
       keywords: "inbox mine my assigned",
       run: () => WH.router.go("/inbox", { assignee: "me" }),
@@ -331,15 +331,15 @@
     ["Anywhere", [
       [[MOD, "K"], "Open the command palette"],
       [["?"], "Show this list"],
-      [["g", "i"], "Go to the inbox"],
+      [["g", "d"], "Go to the dashboard"],
+      [["g", "i"], "Go to reviews"],
       [["g", "s"], "Go to sources"],
       [["g", "b"], "Go to batches"],
       [["g", "a"], "Go to the audit trail"],
-      [["g", "u"], "Upload a PDF"],
       [["/"], "Search on this screen"],
       [["Esc"], "Close a dialog or clear a search"],
     ]],
-    ["Inbox", [
+    ["Reviews", [
       [["J"], "Next document"],
       [["K"], "Previous document"],
       [["↵"], "Open the selected document"],

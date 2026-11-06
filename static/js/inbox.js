@@ -78,13 +78,12 @@
     });
     const offDensity = WH.bus.on("density", (v) => densitySeg.set(v));
     const header = ui.pageHeader({
-      eyebrow: "Worklist",
-      title: "Inbox",
-      sub: "Every document read from your sources, newest activity first.",
+      eyebrow: "Already in eSource",
+      title: "Reviews",
+      sub: "Visit forms that have been scanned. Open one to check it, or scan a folder from Sources.",
       actions: [
         densitySeg,
         WH.can.write() && h("a", { class: "btn btn-quiet wh-btn", href: "#/sources" }, ui.icon("folder", { size: 16 }), "Scan sources"),
-        WH.can.write() && h("a", { class: "btn btn-primary wh-btn", href: "#/upload" }, ui.icon("upload", { size: 16 }), "Upload a PDF"),
       ],
     });
 
@@ -302,7 +301,7 @@
         processing: ["Nothing is being read right now", "Start a scan from Sources to read new documents."],
         submitted: ["Nothing submitted yet", "Signed submissions to the EDC appear here."],
         failed: ["No failures", "Every read finished. Nice."],
-        all: ["Your inbox is empty", "Scan a folder from your sources, or upload a single PDF to get started."],
+        all: ["Nothing has been scanned yet", "Open Sources, pick a folder on the file server, and extract the visit forms inside it."],
       }[f.status] || ["Nothing here", ""];
       return ui.emptyState({
         icon: f.status === "failed" ? "check-circle" : "inbox",
@@ -311,7 +310,6 @@
         action: WH.can.write() && (f.status === "all" || f.status === "ready" || f.status === "processing")
           ? { label: "Scan sources", href: "#/sources", icon: "folder" }
           : null,
-        secondary: WH.can.write() && f.status === "all" ? { label: "Upload a PDF", href: "#/upload", icon: "upload" } : null,
       });
     }
 
@@ -563,8 +561,8 @@
   WH.router.add("/inbox", {
     name: "inbox",
     nav: "inbox",
-    title: "Inbox",
-    crumbs: () => [{ label: "Inbox" }],
+    title: "Reviews",
+    crumbs: () => [{ label: "Reviews" }],
     mount,
   });
 })();

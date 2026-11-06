@@ -1047,7 +1047,7 @@
       return;
     }
     if (!state.docId) {
-      toast("This review isn't on the server, so it can't be submitted. Open it from the inbox.", "error", 4800);
+      toast("This review isn't on the server, so it can't be submitted. Open it from Reviews.", "error", 4800);
       return;
     }
     if (popover) closePopover("default", { keepFocus: true });
