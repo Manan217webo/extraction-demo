@@ -181,10 +181,10 @@
       list.forEach((u) => tbody.appendChild(userRow(u)));
       tableEl.appendChild(h("table", { class: "wh-table wh-users-table", "aria-label": "Users" },
         h("thead", null, h("tr", null,
-          h("th", { scope: "col" }, "User"),
-          h("th", { scope: "col" }, "Role"),
-          h("th", { scope: "col" }, "Status"),
-          h("th", { scope: "col" }, "Last sign-in"),
+          h("th", { scope: "col", class: "wh-col-user" }, "User"),
+          h("th", { scope: "col", class: "wh-col-role" }, "Role"),
+          h("th", { scope: "col", class: "wh-col-state" }, "Status"),
+          h("th", { scope: "col", class: "wh-col-login" }, "Last sign-in"),
           h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
         tbody));
     }
@@ -209,16 +209,16 @@
       }
       const status = userStatus(u);
       return h("tr", { class: ["wh-row", !u.active && "is-inactive"], dataset: { user: u.username } },
-        h("td", null, h("span", { class: "wh-user-cell" }, ui.avatar(u.full_name || u.username, { size: 32 }),
+        h("td", { class: "wh-col-user" }, h("span", { class: "wh-user-cell" }, ui.avatar(u.full_name || u.username, { size: 32 }),
           h("span", null, h("strong", { class: "wh-block" }, u.full_name || u.username, self ? h("span", { class: "wh-you" }, " (you)") : null),
             h("span", { class: "wh-muted wh-mono-num" }, u.username)))),
-        h("td", null, roleSelect),
-        h("td", null, ui.chip(status, {
+        h("td", { class: "wh-col-role" }, roleSelect),
+        h("td", { class: "wh-col-state" }, ui.chip(status, {
           size: "sm",
           label: status === "locked" ? `Locked until ${WH.fmt.time(u.locked_until)}` : null,
           title: status === "locked" ? WH.fmt.both(u.locked_until) : null,
         })),
-        h("td", null, u.last_login_at ? ui.time(u.last_login_at) : h("span", { class: "wh-muted" }, "Never")),
+        h("td", { class: "wh-col-login" }, u.last_login_at ? ui.time(u.last_login_at) : h("span", { class: "wh-muted" }, "Never")),
         h("td", { class: "wh-col-actions" }, actions));
     }
 

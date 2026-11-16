@@ -423,7 +423,7 @@
 
       if (folders.length) {
         listEl.appendChild(h("section", { class: "wh-src-folders", "aria-label": "Folders" },
-          h("h3", null, "Folders"),
+          h("h3", null, "Folders", h("span", { class: "wh-src-count" }, String(folders.length))),
           h("ul", null, folders.map((entry) => renderFolder(entry)))));
       }
       if (!files.length) {
@@ -448,15 +448,16 @@
 
       const tbody = h("tbody");
       files.forEach((entry, index) => tbody.appendChild(renderEntry(entry, index)));
+      const canWrite = WH.can.write();
       listEl.appendChild(h("section", { class: "wh-src-files" },
-        h("h3", null, "Visit forms"),
-        h("table", { class: "wh-table wh-src-table", "aria-label": "Visit forms" },
+        h("h3", null, "Visit forms", h("span", { class: "wh-src-count" }, String(files.length))),
+        h("table", { class: ["wh-table", "wh-src-table", !canWrite && "is-readonly"], "aria-label": "Visit forms" },
           h("thead", null, h("tr", null,
-            h("th", { class: "wh-col-check", scope: "col" }, headBox),
-            h("th", { scope: "col" }, "Name"),
-            h("th", { scope: "col" }, "Status"),
-            h("th", { scope: "col", class: "wh-col-num" }, "Size"),
-            h("th", { scope: "col" }, "Modified"),
+            canWrite && h("th", { class: "wh-col-check", scope: "col" }, headBox),
+            h("th", { scope: "col", class: "wh-col-name" }, "Name"),
+            h("th", { scope: "col", class: "wh-col-state" }, "Status"),
+            h("th", { scope: "col", class: "wh-col-num wh-col-size" }, "Size"),
+            h("th", { scope: "col", class: "wh-col-mod" }, "Modified"),
             h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
           tbody)));
       const rows = tbody.querySelectorAll("tr");
@@ -506,7 +507,13 @@
           toggleAt(index, event.shiftKey, event.target.checked);
         },
       });
-      const nameCell = h("span", { class: "wh-entry-name" }, ui.icon("pdf", { size: 18 }), h("span", null, entry.name));
+      const nameCell = h("span", { class: "wh-entry-name" }, ui.icon("pdf", { size: 18 }),
+        h("span", { class: "wh-entry-text" },
+          h("span", { class: "wh-entry-label", title: entry.name }, entry.name),
+          // Size and date under the name, shown only when the table is too
+          // narrow for their own columns.
+          !isDir && h("span", { class: "wh-entry-sub", "aria-hidden": "true" },
+            [WH.fmt.bytes(entry.size), entry.modified && WH.fmt.relative(entry.modified)].filter(Boolean).join(" · "))));
       const openHref = entry.document_id == null
         ? null
         : entry.status === "processed" || entry.status === "changed"
@@ -548,18 +555,18 @@
           if (event.target.closest("a, input, button")) return;
           if (!covered && WH.can.write()) toggleAt(index, event.shiftKey, !selection.has(entry.path));
         },
-        onKeydown: (event) => onRowKey(event, entry, index),
+        onKeydown: (event) => onRowKey(event, entry, index, openHref),
       },
-      h("td", { class: "wh-col-check" }, box),
+      WH.can.write() && h("td", { class: "wh-col-check" }, box),
       h("td", { class: "wh-col-name" }, nameCell),
-      h("td", null, isDir ? h("span", { class: "wh-muted" }, "Folder") : entry.status ? ui.chip(entry.status, { size: "sm" }) : null),
-      h("td", { class: "wh-col-num" }, isDir ? "" : WH.fmt.bytes(entry.size)),
-      h("td", null, entry.modified ? ui.time(entry.modified) : ""),
+      h("td", { class: "wh-col-state" }, isDir ? h("span", { class: "wh-muted" }, "Folder") : entry.status ? ui.chip(entry.status, { size: "sm" }) : null),
+      h("td", { class: "wh-col-num wh-col-size" }, isDir ? "" : WH.fmt.bytes(entry.size)),
+      h("td", { class: "wh-col-mod" }, entry.modified ? ui.time(entry.modified) : ""),
       h("td", { class: "wh-col-actions" }, action));
       return row;
     }
 
-    function onRowKey(event, entry, index) {
+    function onRowKey(event, entry, index, openHref) {
       const rows = Array.from(listEl.querySelectorAll("tbody tr"));
       const focusRow = (i) => {
         const r = rows[Math.max(0, Math.min(rows.length - 1, i))];
@@ -582,7 +589,8 @@
         if (!coveringFolder(entry.path) && WH.can.write()) toggleAt(index, event.shiftKey, !selection.has(entry.path));
       } else if (event.key === "Enter") {
         event.preventDefault();
-        if (entry.document_id != null) WH.router.go(`/review/${entry.document_id}`);
+        // Same destination as the row's "Open" button.
+        if (openHref) location.hash = openHref;
       } else if (event.key === "Backspace" && listing && path) {
         event.preventDefault();
         openFolder(listing.parent || "");
@@ -783,7 +791,7 @@
           });
           segs.set(f.path, control);
         }
-        return h("li", { class: "wh-dup-row" },
+        return h("li", { class: ["wh-dup-row", `wh-dup-row--${f.status}`] },
           h("div", { class: "wh-dup-file" },
             h("span", { class: "wh-dup-name" }, ui.icon("pdf", { size: 16 }), h("span", null, f.name)),
             h("span", { class: "wh-dup-meta" },
@@ -793,7 +801,7 @@
               f.size != null && h("span", { class: "wh-muted" }, WH.fmt.bytes(f.size))),
             prior && prior.submitted && h("span", { class: "wh-dup-warn" }, ui.icon("check-seal", { size: 14 }),
               "Already submitted to the EDC. Scanning again makes a new version here. The EDC keeps the submitted values until someone reviews and submits again."),
-            h("span", { class: "wh-dup-path", title: f.path }, f.path)),
+            f.path !== f.name && h("span", { class: "wh-dup-path", title: f.path }, f.path)),
           control);
       }
 

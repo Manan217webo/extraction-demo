@@ -64,6 +64,7 @@
     "arrow-right": '<path d="M4.5 12h15m0 0-5.5-5.5M19.5 12l-5.5 5.5"/>',
     sparkle: '<path d="M12 3.5c.6 4.2 2.3 5.9 6.5 6.5-4.2.6-5.9 2.3-6.5 6.5-.6-4.2-2.3-5.9-6.5-6.5 4.2-.6 5.9-2.3 6.5-6.5z"/><path d="M18.5 15.5c.3 1.6 1 2.3 2.5 2.5-1.6.3-2.2 1-2.5 2.5-.3-1.6-1-2.2-2.5-2.5 1.6-.3 2.2-1 2.5-2.5z"/>',
     eye: '<path d="M2.8 12S6 5.5 12 5.5 21.2 12 21.2 12 18 18.5 12 18.5 2.8 12 2.8 12z"/><circle cx="12" cy="12" r="2.8"/>',
+    archive: '<rect x="3" y="4" width="18" height="4.5" rx="1.2"/><path d="M5 8.5V18a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5"/><path d="M10 12.5h4"/>',
     "eye-off": '<path d="m4 4 16 16"/><path d="M10.6 6A9.6 9.6 0 0 1 12 5.5c6 0 9.2 6.5 9.2 6.5a16 16 0 0 1-2.6 3.4M6.6 7.4A15.6 15.6 0 0 0 2.8 12S6 18.5 12 18.5c1.6 0 3-.4 4.2-1.1"/><path d="M9.9 10a2.8 2.8 0 0 0 4 4"/>',
     signature: '<path d="M3.5 17.5c2.5 0 3.5-9.5 6-9.5 2 0-.5 8 1.5 8 1.3 0 2-2.5 3-2.5s1 2 2.5 2"/><path d="M3.5 20.5h17"/>',
     pause: '<circle cx="12" cy="12" r="8.5"/><path d="M10 9v6M14 9v6"/>',
@@ -113,6 +114,7 @@
     submitted: { label: "Submitted", icon: "check-seal", tone: "success" },
     failed: { label: "Failed", icon: "x-circle", tone: "danger" },
     needs_input: { label: "Needs input", icon: "alert-circle", tone: "warn" },
+    archived: { label: "Archived", icon: "archive", tone: "neutral" },
     // source files
     new: { label: "Not scanned", icon: "plus", tone: "info" },
     processed: { label: "Already scanned", icon: "check", tone: "success" },

@@ -168,6 +168,26 @@ def test_versions_and_duplicate_classification(isolated):
     run(scenario())
 
 
+def test_a_file_waiting_for_its_header_counts_as_already_read(isolated):
+    """A run that stopped at "needs input" read the file; scanning it again must ask."""
+    import db
+    import documents
+
+    async def scenario():
+        async with db.session() as s:
+            first = await documents.ingest(s, source_id="fs", path="v3.pdf", filename="v3.pdf",
+                                           data=b"%PDF three", username="alice")
+            ex = await documents.new_extraction(s, first.document, username="alice")
+            ex.status = "needs_input"
+            await s.commit()
+            sha = first.version.sha256
+            status, prior = await documents.classify(s, "fs", "v3.pdf", sha)
+            assert status == "processed" and prior["document_id"] == first.document.id
+            assert (await documents.classify(s, "fs", "moved/v3.pdf", sha))[0] == "processed"
+
+    run(scenario())
+
+
 # --------------------------------------------------------------------------- reads
 
 

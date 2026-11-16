@@ -20,6 +20,11 @@ hash-chained audit trail that is also delivered to the EDC.
 | **Submit** | Pre-flight reads the EDC fresh and shows exactly what will change; unchanged values are not sent (and nothing is sent if nothing changed). Signing re-asks the password and the meaning of the signature (21 CFR 11). Afterwards the visit is read back to confirm the values landed. |
 | **Audit** | Every action — sign-ins, scans, AI proposals with model and confidence, edits with old/new/reason, signatures, submissions, exports — is one event, written in the same transaction as the change, chained by HMAC-SHA-256, and refused UPDATE/DELETE by the database. Filter, verify and export (CSV/JSON) from the Audit screen. |
 | **To the EDC** | Audit events are queued in an outbox and posted to `EDC_AUDIT_URL` in order (CDISC ODM AuditRecord field names, idempotency keys, exponential back-off). Unset, they are held locally and released when it is set. |
+| **Access** | With Cronos sign-in, people see only the folders, records and audit trail of their own Cronos studies and sites (folders are tagged `study`/`site` in `sources.json`). Anything else is not found, even by its link. |
+| **One editor** | Opening a record takes its lock; anyone else gets it read-only with "In use by …", and it opens up for them by itself when the first person leaves. Admins can release a lock. |
+| **Already processed** | A submitted record opens read-only. "Process again" asks for remarks (mandatory) before it can change; Cancel changes nothing. |
+| **Archive** | A record pushed to the wrong folder can be archived with a reason: off the work list, read-only, nothing deleted, restorable. |
+| **Missing forms** | Forms printed on the scan that the EDC visit doesn't have are listed on the review and in pre-flight, instead of disappearing silently. |
 | **Accounts** | Reviewer / monitor (read-only) / admin. Lockout after 5 failures, 12-character passwords, 15-minute idle timeout with a warning, accounts disabled not deleted. |
 
 The API contract is in `docs/API.md`.
@@ -184,6 +189,8 @@ uv export --no-hashes --no-emit-project --output-file requirements.txt
 | `sources.py` | File-server sources and path safety |
 | `blobstore.py` | Write-once storage of originals by SHA-256 |
 | `auth.py` | Accounts, roles, lockout, sessions |
+| `access.py` | Study/site scope from Cronos assignments |
+| `locks.py` | One-editor record locks (Redis) |
 | `store.py` | Redis working copies of jobs, parse cache, locks |
 | `edc.py` | Cronos EDC connector — the three `/api/EDC/*` endpoints |
 | `visit_forms.py` | Turns an EDC visit into a renderable form, and back into a save payload |

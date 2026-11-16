@@ -22,6 +22,9 @@ import db
 
 UPLOAD_SOURCE = "upload"
 DONE_STATUSES = {"ready", "in_review", "submitted"}
+# Read already, for duplicate detection: a run that stopped at "needs input" read
+# the file (and spent the AI call); it waits for its header, not for a new scan.
+READ_STATUSES = DONE_STATUSES | {"needs_input"}
 ACTIVE_EXTRACTION = {"queued", "running"}
 # A run driven from the browser (an upload) has no worker lease; one left
 # untouched this long was abandoned and no longer blocks a re-read.
@@ -150,7 +153,7 @@ async def submitted(session: AsyncSession, document_id: str) -> bool:
 
 
 async def prior_for(session: AsyncSession, document: db.Document) -> dict[str, Any]:
-    done = await latest_extraction(session, document.id, DONE_STATUSES)
+    done = await latest_extraction(session, document.id, READ_STATUSES)
     return {"document_id": document.id,
             "processed_at": iso(done.finished_at or done.created_at) if done else None,
             "processed_by": done.created_by if done else None,
@@ -174,7 +177,7 @@ async def classify(session: AsyncSession, source_id: str, path: str,
         if is_active(active):
             return "processing", await prior_for(session, document)
         version = await latest_version(session, document.id)
-        done = await latest_extraction(session, document.id, DONE_STATUSES)
+        done = await latest_extraction(session, document.id, READ_STATUSES)
         if version is not None and version.sha256 != sha256 and done is not None:
             return "changed", await prior_for(session, document)
         if version is not None and version.sha256 == sha256 and done is not None:
@@ -186,7 +189,7 @@ async def classify(session: AsyncSession, source_id: str, path: str,
                                  db.DocumentVersion.document_id == db.Document.id)
         .join(db.Extraction, db.Extraction.document_id == db.Document.id)
         .where(db.DocumentVersion.sha256 == sha256,
-               db.Extraction.status.in_(DONE_STATUSES))
+               db.Extraction.status.in_(READ_STATUSES))
         .limit(1))).scalar()
     if other is not None:
         prior = await prior_for(session, other)
@@ -211,6 +214,11 @@ def doc_dict(document: db.Document, extraction: Optional[db.Extraction] = None,
                         "stage": extraction.stage, "error": extraction.error}
                        if extraction else None),
         "draft_revision": draft_revision,
+        "archived": ({"at": iso(document.archived_at), "by": document.archived_by,
+                      "reason": document.archive_reason}
+                     if getattr(document, "archived_at", None) else None),
+        "reopened": ({"at": iso(document.reopened_at), "by": document.reopened_by}
+                     if getattr(document, "reopened_at", None) else None),
     }
 
 

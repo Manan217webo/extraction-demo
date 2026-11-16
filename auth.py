@@ -261,9 +261,12 @@ async def sign_in_with_cronos(username: str, password: str, *,
                 403, "DISABLED", "Your eSource access is turned off. Ask an administrator.")
         user.last_login_at = db.utcnow()
         user.failed_logins, user.locked_until = 0, None
+        # Study/site access follows Cronos, refreshed at every sign-in.
+        user.cronos_assignments = [dict(a) for a in grant.assignments if isinstance(a, dict)]
         await audit.record(session, "auth.login", username=user.username, client_ip=client_ip,
                            details={"via": "cronos", "cronos_user_id": grant.user_id,
-                                    "cronos_roles": grant.roles})
+                                    "cronos_roles": grant.roles,
+                                    "assignments": user.cronos_assignments})
         await session.commit()
         return user, grant
 

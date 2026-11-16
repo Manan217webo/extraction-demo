@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+import access
 import audit
 import auth
 import blobstore
@@ -28,6 +29,7 @@ import cronos_auth
 import db
 import documents
 import esource
+import locks
 import sources
 
 log = logging.getLogger("extraction.api")
@@ -113,11 +115,69 @@ def _source_error(exc: sources.SourceError) -> HTTPException:
     return HTTPException(exc.status, str(exc))
 
 
-async def _document(session, document_id: str) -> db.Document:
+async def _document(session, document_id: str, user: Optional[db.User] = None) -> db.Document:
+    """The document, if it exists and — given a user — is in their study/site scope.
+    Out of scope reads as not found, so ids can't be probed."""
     document = await session.get(db.Document, document_id)
     if document is None:
         raise HTTPException(404, "That document could not be found.")
+    if user is not None and not access.scope_for(user).sees_document(document):
+        raise HTTPException(404, "That document could not be found.")
     return document
+
+
+def _source(user: db.User, source_id: str) -> sources.Connector:
+    """A configured source this person may see; others read as not configured."""
+    conn = sources.get(source_id)
+    if not access.scope_for(user).sees_source(conn):
+        raise sources.SourceError("That file source isn't configured.", 404)
+    return conn
+
+
+async def _last_submission_at(session, document: db.Document) -> Optional[dt.datetime]:
+    return (await session.execute(
+        select(func.max(db.Submission.submitted_at)).where(
+            db.Submission.document_id == document.id,
+            db.Submission.status.in_(("sent", "unchanged"))))).scalar()
+
+
+async def _reopen_required(session, document: db.Document) -> bool:
+    """Submitted, and not opened for changes again (with remarks) since."""
+    last = await _last_submission_at(session, document)
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=dt.timezone.utc)
+    reopened = document.reopened_at
+    if reopened is not None and reopened.tzinfo is None:
+        reopened = reopened.replace(tzinfo=dt.timezone.utc)
+    return reopened is None or reopened < last
+
+
+ARCHIVED = "This record is archived. Restore it before changing it."
+REOPEN_FIRST = ("This record was already submitted to the EDC. Choose “Process again” and "
+                "enter remarks before changing it.")
+
+
+def _locked_out(held: dict[str, Any]) -> HTTPException:
+    return HTTPException(423, {
+        "message": f"{held.get('full_name') or held['username']} is working on this record. "
+                   "It opens read-only until they close it.",
+        "lock": {"username": held["username"], "full_name": held.get("full_name"),
+                 "since": held.get("since")}})
+
+
+async def _guard_write(session, document: db.Document, user: db.User, *,
+                       submitted_ok: bool = False) -> None:
+    """Refuse a change to an archived record, to a submitted one nobody reopened,
+    or to one someone else has open. Takes (or renews) this person's lock."""
+    if document.archived_at is not None:
+        raise HTTPException(409, ARCHIVED)
+    if not submitted_ok and await _reopen_required(session, document):
+        raise HTTPException(409, REOPEN_FIRST)
+    ok, held = await locks.acquire(document.id, user.username, user.full_name)
+    if not ok:
+        raise _locked_out(held)
 
 
 # --------------------------------------------------------------------------- meta
@@ -135,8 +195,10 @@ async def meta(request: Request) -> dict[str, Any]:
 
 @router.get("/sources")
 async def list_sources(request: Request) -> dict[str, Any]:
-    await current(request)
-    return {"sources": [sources.summary(c) for c in sources.load().values()]}
+    user = await current(request)
+    scope = access.scope_for(user)
+    return {"sources": [sources.summary(c) for c in sources.load().values()
+                        if scope.sees_source(c)]}
 
 
 async def _status_by_path(source_id: str, paths: list[str]) -> dict[str, tuple[str, str, Any]]:
@@ -156,9 +218,9 @@ async def _status_by_path(source_id: str, paths: list[str]) -> dict[str, tuple[s
 
 @router.get("/sources/{source_id}/browse")
 async def browse(source_id: str, request: Request, path: str = "") -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     try:
-        conn = sources.get(source_id)
+        conn = _source(user, source_id)
         rel = sources.clean_rel(path)
         entries, truncated = await conn.list_dir(rel)
     except sources.SourceError as exc:
@@ -216,9 +278,9 @@ class PreviewRequest(BaseModel):
 
 @router.post("/batches/preview")
 async def preview(body: PreviewRequest, request: Request) -> dict[str, Any]:
-    await writer(request)
+    user = await writer(request)
     try:
-        conn = sources.get(body.source_id)
+        conn = _source(user, body.source_id)
         found: dict[str, sources.Entry] = {}
         for raw in body.paths or [""]:
             for entry in await conn.walk_pdfs(sources.clean_rel(raw)):
@@ -252,6 +314,13 @@ async def preview(body: PreviewRequest, request: Request) -> dict[str, Any]:
                               "prior": None})
                 continue
             status, prior = await documents.classify(session, conn.id, entry.path, sha)
+            if prior and prior.get("document_id"):
+                # The same file read at a site this person can't see: say it was
+                # processed, but not where, when or by whom.
+                other = await session.get(db.Document, prior["document_id"])
+                if other is not None and not access.scope_for(user).sees_document(other):
+                    prior = {"document_id": None, "processed_at": None, "processed_by": None,
+                             "submitted": prior.get("submitted")}
             counts[status] += 1
             files.append({"path": entry.path, "name": entry.name, "size": entry.size,
                           "modified": entry.modified, "sha256": sha, "status": status,
@@ -282,7 +351,7 @@ async def create_batch(body: BatchRequest, request: Request) -> dict[str, Any]:
     if any(f.reprocess for f in body.files) and not reason:
         raise HTTPException(422, "Give a reason for processing these files again.")
     try:
-        conn = sources.get(body.source_id)
+        conn = _source(user, body.source_id)
     except sources.SourceError as exc:
         raise _source_error(exc) from exc
 
@@ -362,10 +431,14 @@ async def _batch_dict(session, batch: db.Batch) -> dict[str, Any]:
 
 @router.get("/batches")
 async def list_batches(request: Request, limit: int = 50) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
+    scope = access.scope_for(user)
+    query = select(db.Batch)
+    if not scope.everything:
+        query = query.where(db.Batch.source_id.in_(sorted(scope.source_ids())))
     async with db.session() as session:
         rows = (await session.execute(
-            select(db.Batch).order_by(db.Batch.created_at.desc()).limit(min(limit, 200))
+            query.order_by(db.Batch.created_at.desc()).limit(min(limit, 200))
         )).scalars().all()
         return {"batches": [await _batch_dict(session, b) for b in rows]}
 
@@ -380,12 +453,17 @@ def _item(extraction: db.Extraction, document: db.Document) -> dict[str, Any]:
             "finished_at": documents.iso(extraction.finished_at)}
 
 
+def _sees_batch(user: db.User, batch: db.Batch) -> bool:
+    scope = access.scope_for(user)
+    return scope.everything or batch.source_id in scope.source_ids()
+
+
 @router.get("/batches/{batch_id}")
 async def get_batch(batch_id: str, request: Request) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     async with db.session() as session:
         batch = await session.get(db.Batch, batch_id)
-        if batch is None:
+        if batch is None or not _sees_batch(user, batch):
             raise HTTPException(404, "That batch could not be found.")
         rows = (await session.execute(
             select(db.Extraction, db.Document).join(db.Document,
@@ -400,7 +478,7 @@ async def cancel_batch(batch_id: str, request: Request) -> dict[str, Any]:
     user = await writer(request)
     async with db.session() as session:
         batch = await session.get(db.Batch, batch_id)
-        if batch is None:
+        if batch is None or not _sees_batch(user, batch):
             raise HTTPException(404, "That batch could not be found.")
         if batch.created_by != user.username and user.role != "admin":
             raise HTTPException(403, "Only the person who started a batch, or an admin, can cancel it.")
@@ -433,7 +511,9 @@ async def retry_extraction(extraction_id: str, request: Request) -> dict[str, An
         if extraction.status not in ("failed", "cancelled", "needs_input") \
                 and not (extraction.status == "running" and not documents.is_active(extraction)):
             raise HTTPException(409, "Only a failed or stopped run can be retried.")
-        document = await session.get(db.Document, extraction.document_id)
+        document = await _document(session, extraction.document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, ARCHIVED)
         extraction.status, extraction.stage, extraction.error = "queued", None, None
         extraction.lease_until, extraction.attempts, extraction.finished_at = None, 0, None
         extraction.claimed_by = None
@@ -452,9 +532,13 @@ async def retry_extraction(extraction_id: str, request: Request) -> dict[str, An
 async def list_docs(request: Request, status: Optional[str] = None, q: Optional[str] = None,
                     protocol: Optional[str] = None, subject: Optional[str] = None,
                     assignee: Optional[str] = None, flagged: Optional[bool] = None,
+                    archived: bool = False,
                     limit: int = 50, offset: int = 0) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     filters = []
+    clause = access.scope_for(user).document_clause()
+    if clause is not None:
+        filters.append(clause)
     if protocol:
         filters.append(db.Document.protocol_no == protocol)
     if subject:
@@ -471,14 +555,22 @@ async def list_docs(request: Request, status: Optional[str] = None, q: Optional[
                            db.Document.screening_no.ilike(like),
                            db.Document.protocol_no.ilike(like),
                            db.Document.visit_name.ilike(like)))
+    # Archived records leave the work list; ?archived=true lists only them.
+    live = filters + [db.Document.archived_at.is_(None)]
     async with db.session() as session:
+        archived_count = (await session.execute(
+            select(func.count()).select_from(db.Document)
+            .where(*filters, db.Document.archived_at.is_not(None)))).scalar() or 0
+        filters = filters + [db.Document.archived_at.is_not(None) if archived
+                             else db.Document.archived_at.is_(None)]
         counts_rows = (await session.execute(
-            select(db.Document.status, func.count()).where(and_(*filters) if filters else True)
+            select(db.Document.status, func.count()).where(*live)
             .group_by(db.Document.status))).all()
         counts = {"processing": 0, "ready": 0, "in_review": 0, "submitted": 0, "failed": 0,
                   "needs_input": 0}
         for st, n in counts_rows:
             counts[st] = counts.get(st, 0) + int(n)
+        counts["archived"] = int(archived_count)
         query = select(db.Document).where(*filters)
         if status:
             query = query.where(db.Document.status.in_(status.split(",")))
@@ -493,14 +585,21 @@ async def list_docs(request: Request, status: Optional[str] = None, q: Optional[
             draft = await esource.latest_draft(session, document.id)
             out.append(documents.doc_dict(document, extraction,
                                           draft.revision if draft else None))
-        return {"documents": out, "total": total, "counts": counts}
+    try:
+        held = await locks.holders([d["id"] for d in out])
+    except Exception as exc:  # the list still loads without lock badges
+        log.warning("record locks unavailable for the inbox: %s", exc)
+        held = {}
+    for item in out:
+        item["lock"] = locks.public(held.get(item["id"]), user.username)
+    return {"documents": out, "total": total, "counts": counts}
 
 
 @router.get("/docs/{document_id}")
 async def get_doc(document_id: str, request: Request) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         extraction = await documents.latest_extraction(session, document.id)
         draft = await esource.latest_draft(session, document.id)
         return {"document": documents.doc_dict(document, extraction,
@@ -514,7 +613,7 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
 
     user = await current(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
@@ -530,6 +629,7 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
         signature = (await session.get(db.Signature, submission.signature_id)
                      if submission and submission.signature_id else None)
         snapshot = extraction.snapshot or {}
+        reopen_required = await _reopen_required(session, document)
         await audit.record(session, "document.viewed", username=user.username, document=document,
                            client_ip=client_ip(request),
                            details={"extraction_id": extraction.id})
@@ -539,11 +639,22 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
 
     meta = await web._owned_job(job_id, user.username)
     result = web._vision_status(meta)
+    # Writers take the record's lock when they could change it; whoever opens it
+    # second gets it read-only and is told who has it.
+    lock = None
+    if user.role in ("reviewer", "admin"):
+        if doc.get("archived") is None and not reopen_required:
+            ok, held = await locks.acquire(document_id, user.username, user.full_name)
+            lock = held
+        else:
+            lock = await locks.holder(document_id)
     primary, secondary = fields.read_models(True)
     payload = draft.payload if draft is not None else snapshot.get("payload")
     return {
         "document": doc, "job_id": job_id, "extraction_id": extraction.id,
-        "readonly": user.role == "monitor",
+        "readonly": user.role == "monitor" or doc.get("archived") is not None,
+        "reopen_required": reopen_required and user.role in ("reviewer", "admin"),
+        "lock": locks.public(lock, user.username),
         "result": result, "header": snapshot.get("header"), "visit": snapshot.get("visit"),
         "payload": payload,
         "draft": ({"revision": draft.revision, "saved_at": documents.iso(draft.saved_at),
@@ -560,9 +671,9 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
 
 @router.get("/docs/{document_id}/file")
 async def doc_file(document_id: str, request: Request, version: Optional[int] = None) -> Response:
-    await current(request)
+    user = await current(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         query = select(db.DocumentVersion).where(db.DocumentVersion.document_id == document.id)
         if version:
             query = query.where(db.DocumentVersion.version == version)
@@ -591,7 +702,9 @@ class AssignRequest(BaseModel):
 async def assign(document_id: str, body: AssignRequest, request: Request) -> dict[str, Any]:
     user = await writer(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, ARCHIVED)
         if body.username and await session.get(db.User, body.username) is None:
             raise HTTPException(404, "That user doesn't exist.")
         old = document.assignee
@@ -605,9 +718,9 @@ async def assign(document_id: str, body: AssignRequest, request: Request) -> dic
 
 @router.get("/docs/{document_id}/history")
 async def history(document_id: str, request: Request) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         versions = (await session.execute(
             select(db.DocumentVersion).where(db.DocumentVersion.document_id == document.id)
             .order_by(db.DocumentVersion.version))).scalars().all()
@@ -647,9 +760,9 @@ async def history(document_id: str, request: Request) -> dict[str, Any]:
 
 @router.get("/docs/{document_id}/diff")
 async def diff(document_id: str, request: Request, a: int = 0, b: Optional[int] = None) -> dict[str, Any]:
-    await current(request)
+    user = await current(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         extraction = await esource.current_extraction(session, document.id)
 
         async def payload_for(rev: Optional[int]) -> dict[str, Any]:
@@ -688,14 +801,130 @@ async def reprocess(document_id: str, body: ReasonRequest, request: Request) -> 
     if not reason:
         raise HTTPException(422, "Give a reason for processing this document again.")
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
+        await _guard_write(session, document, user, submitted_ok=True)
         if documents.is_active(await documents.latest_extraction(
                 session, document.id, documents.ACTIVE_EXTRACTION)):
             raise HTTPException(409, "This document is already being read.")
         extraction = await documents.new_extraction(session, document, username=user.username,
                                                     reason=reason, client_ip=client_ip(request))
+        # Reading a submitted record again is processing it again, with this reason.
+        if await _last_submission_at(session, document) is not None:
+            document.reopened_at, document.reopened_by = db.utcnow(), user.username
         await session.commit()
         return {"extraction_id": extraction.id}
+
+
+@router.post("/docs/{document_id}/lock")
+async def take_lock(document_id: str, request: Request) -> dict[str, Any]:
+    """Take or renew this person's lock on a record they have open for changes."""
+    user = await writer(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, ARCHIVED)
+        if await _reopen_required(session, document):
+            raise HTTPException(409, REOPEN_FIRST)
+    ok, held = await locks.acquire(document_id, user.username, user.full_name)
+    return {"acquired": ok, "lock": locks.public(held, user.username)}
+
+
+@router.delete("/docs/{document_id}/lock")
+async def drop_lock(document_id: str, request: Request, force: bool = False) -> dict[str, Any]:
+    """Give the lock back on close. An administrator may release someone else's."""
+    user = await current(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if not force:
+            released = await locks.release(document_id, user.username)
+            return {"released": released is not None}
+        if user.role != "admin":
+            raise HTTPException(403, "Only an administrator can release someone else's lock.")
+        released = await locks.release(document_id)
+        if released is not None:
+            await audit.record(session, "document.lock_released", username=user.username,
+                               document=document, client_ip=client_ip(request),
+                               old_value=released["username"],
+                               reason="Released by an administrator",
+                               details={"since": released.get("since")})
+            await session.commit()
+        return {"released": released is not None}
+
+
+@router.post("/docs/{document_id}/archive")
+async def archive(document_id: str, body: ReasonRequest, request: Request) -> dict[str, Any]:
+    """Take a record off the work list — e.g. a copy pushed to the wrong site. Nothing
+    is deleted; it stays searchable under Archived and opens read-only."""
+    user = await writer(request)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(422, "Give a reason for archiving this record.")
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, "This record is already archived.")
+        ok, held = await locks.acquire(document.id, user.username, user.full_name)
+        if not ok:
+            raise _locked_out(held)
+        if documents.is_active(await documents.latest_extraction(
+                session, document.id, documents.ACTIVE_EXTRACTION)):
+            raise HTTPException(409, "This record is still being read. Archive it when it's done.")
+        document.archived_at, document.archived_by = db.utcnow(), user.username
+        document.archive_reason = reason
+        await audit.record(session, "document.archived", username=user.username,
+                           document=document, client_ip=client_ip(request), reason=reason,
+                           new_value="archived", old_value=document.status)
+        await session.commit()
+        out = documents.doc_dict(document)
+    await locks.release(document_id, user.username)
+    return {"document": out}
+
+
+@router.post("/docs/{document_id}/restore")
+async def restore(document_id: str, body: ReasonRequest, request: Request) -> dict[str, Any]:
+    user = await writer(request)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(422, "Give a reason for restoring this record.")
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if document.archived_at is None:
+            raise HTTPException(409, "This record isn't archived.")
+        old = f"archived by {document.archived_by}: {document.archive_reason}"
+        document.archived_at = document.archived_by = document.archive_reason = None
+        await audit.record(session, "document.restored", username=user.username,
+                           document=document, client_ip=client_ip(request), reason=reason,
+                           old_value=old, new_value=document.status)
+        await session.commit()
+        return {"document": documents.doc_dict(document)}
+
+
+@router.post("/docs/{document_id}/reopen")
+async def reopen(document_id: str, body: ReasonRequest, request: Request) -> dict[str, Any]:
+    """Process an already submitted record again. Remarks are mandatory; until this is
+    done, a submitted record opens read-only."""
+    user = await writer(request)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(422, "Enter remarks for processing this record again.")
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, ARCHIVED)
+        last = await _last_submission_at(session, document)
+        if last is None:
+            raise HTTPException(409, "This record hasn't been submitted, so it is already open "
+                                     "for changes.")
+        ok, held = await locks.acquire(document.id, user.username, user.full_name)
+        if not ok:
+            raise _locked_out(held)
+        document.reopened_at, document.reopened_by = db.utcnow(), user.username
+        await audit.record(session, "document.reopened", username=user.username,
+                           document=document, client_ip=client_ip(request), reason=reason,
+                           details={"last_submitted_at": documents.iso(last)})
+        await session.commit()
+        return {"document": documents.doc_dict(document),
+                "lock": locks.public(held, user.username)}
 
 
 class DraftRequest(BaseModel):
@@ -709,7 +938,8 @@ class DraftRequest(BaseModel):
 async def save_draft(document_id: str, body: DraftRequest, request: Request) -> dict[str, Any]:
     user = await writer(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
+        await _guard_write(session, document, user)
         right = await require_duty(request, user, "review", document)
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
@@ -805,13 +1035,16 @@ def _blocked(payload: dict[str, Any]) -> list[dict[str, Any]]:
 async def preflight(document_id: str, body: PreflightRequest, request: Request) -> dict[str, Any]:
     user = await writer(request)
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
+        await _guard_write(session, document, user)
         await require_duty(request, user, "submit", document)
         extraction = await esource.current_extraction(session, document.id)
     save, warnings, delta = await _fresh_save(document, extraction, body.payload, {})
     open_flags = [f.get("label") for f in documents.iter_form_fields(body.payload.get("form") or {})
                   if f.get("value") is not None and f.get("status") not in ("edited", "manual")
                   and set(f.get("issues") or []) & {"reads_disagree", "one_read_only", "low_confidence"}]
+    missing = esource.missing_form_warnings(body.payload)
+    warnings = missing + warnings
     if open_flags:
         warnings = [f"{len(open_flags)} value(s) the AI was unsure of haven't been changed "
                     f"— make sure you checked them against the page: "
@@ -843,7 +1076,8 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
     # Re-authentication at the moment of signing (21 CFR 11.200). A wrong
     # password counts towards the lockout but does not end the session.
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
+        await _guard_write(session, document, user)
     # Checked fresh (no cache) before the signature, so a revoked delegation
     # stops the signing rather than being noticed afterwards.
     right = await require_duty(request, user, "submit", document, fresh=True)
@@ -861,7 +1095,7 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                                      auth.max_seconds())
 
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
@@ -955,7 +1189,7 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
             verification = await _verify_in_edc(document, delta["changes"])
 
     async with db.session() as session:
-        document = await _document(session, document_id)
+        document = await _document(session, document_id, user)
         submission = await session.get(db.Submission, submission_id)
         submission.status, submission.error = status, error
         submission.images = counts["images"]
@@ -1058,6 +1292,13 @@ async def _audit_scope(user: db.User, filters: list[Any]) -> list[Any]:
     if user.role == "reviewer":
         filters.append(or_(db.AuditEvent.document_id.is_not(None),
                            db.AuditEvent.username == user.username))
+    # Study/site scope: only the trail of records this person may see, plus their own
+    # events that belong to no record.
+    scope = access.scope_for(user)
+    if not scope.everything:
+        filters.append(or_(db.AuditEvent.document_id.in_(scope.visible_document_ids()),
+                           and_(db.AuditEvent.document_id.is_(None),
+                                db.AuditEvent.username == user.username)))
     return filters
 
 

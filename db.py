@@ -124,6 +124,15 @@ class Document(Base):
     confidence: Mapped[Optional[float]] = mapped_column(Float)
     updated_at: Mapped[dt.datetime] = mapped_column(TZDateTime(), default=utcnow, onupdate=utcnow,
                                                     index=True)
+    # Taken off the work list (e.g. pushed to the wrong site's folder). The record
+    # and its trail stay; it opens read-only until it is restored.
+    archived_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime(), index=True)
+    archived_by: Mapped[Optional[str]] = mapped_column(String(128))
+    archive_reason: Mapped[Optional[str]] = mapped_column(Text)
+    # A submitted record is opened for changes again only on purpose, with remarks.
+    # Later than the last submission = open for changes; earlier or NULL = not.
+    reopened_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
+    reopened_by: Mapped[Optional[str]] = mapped_column(String(128))
     __table_args__ = (UniqueConstraint("source_id", "path", name="uq_document_source_path"),)
 
 
@@ -287,6 +296,9 @@ class User(Base):
     # (signs in through Cronos; password_hash is a placeholder that never matches).
     auth_source: Mapped[Optional[str]] = mapped_column(String(16))
     cronos_user_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    # The study/site assignments Cronos returned at the last sign-in:
+    # [{"projectId", "projectName", "siteId", "siteName"}]. What this person may see.
+    cronos_assignments: Mapped[Optional[list[Any]]] = mapped_column(JSON)
 
 
 Index("ix_extraction_claim", Extraction.status, Extraction.created_at)

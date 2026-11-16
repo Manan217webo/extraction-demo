@@ -819,6 +819,64 @@ async def _extract_sections(document: str, form: dict[str, Any],
     return {"values": merged, "_usage": _merge_usage(usages)}
 
 
+FORM_TITLES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "forms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string",
+                              "description": "The form's printed title, as written."},
+                    "page": {"type": "integer",
+                             "description": "The page the form starts on, from 1."},
+                },
+                "required": ["title", "page"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["forms"],
+    "additionalProperties": False,
+}
+
+FORM_TITLES_RULES = """You list the case report forms (CRFs) printed in a clinical trial
+source document. A form is a titled block that collects data, such as "Vital Signs",
+"Demographics", "Haematology" or "Physical Examination".
+- Return each form once, with its printed title exactly as written and the page it
+  starts on.
+- Do not list the document header (protocol, subject, visit), page headers or footers,
+  sub-headings or table headings inside a form, instructions, or signature blocks.
+- If you are unsure whether a heading is a form of its own, leave it out."""
+
+
+async def extract_form_titles(document: str,
+                              images: Optional[list[tuple[int, str]]] = None,
+                              model: Optional[str] = None) -> list[dict[str, Any]]:
+    """The forms printed in the document, by title and first page."""
+    messages = [
+        {"role": "system", "content": FORM_TITLES_RULES},
+        {"role": "user", "content": _with_images(
+            "List the forms in this source document.\n\nDocument:\n\n" + document,
+            images or [])},
+    ]
+    result = await _complete(messages, FORM_TITLES_SCHEMA, "crf_titles", model=model,
+                             max_tokens=1200)
+    out, seen = [], set()
+    for item in result.get("forms") or []:
+        title = " ".join(str((item or {}).get("title") or "").split())[:120]
+        if not title or title.casefold() in seen:
+            continue
+        seen.add(title.casefold())
+        try:
+            page = max(1, int((item or {}).get("page") or 1))
+        except (TypeError, ValueError):
+            page = 1
+        out.append({"title": title, "page": page})
+    return out
+
+
 def second_read_model() -> Optional[str]:
     """The model for the independent second read, or None when it is turned off.
 
@@ -985,9 +1043,18 @@ async def extract_form(document: str, form: dict[str, Any], header: dict[str, An
     if second_model:
         reads.append(_extract_sections(document, form, header, images, model=second_model,
                                        with_boxes=False))
+    # Which forms the scan holds, read alongside: it only feeds a warning, so a
+    # failure here never costs the values.
+    titles_task = asyncio.ensure_future(extract_form_titles(document, images, model=primary))
     gathered = await asyncio.gather(*reads, return_exceptions=True)
     if isinstance(gathered[0], BaseException):
+        titles_task.cancel()
         raise gathered[0]
+    try:
+        titles: Optional[list[dict[str, Any]]] = await titles_task
+    except Exception as exc:
+        log.warning("form titles could not be read: %s", exc)
+        titles = None
 
     first = _form_rows(gathered[0], form)
     second: Optional[list[dict[str, Any]]] = None
@@ -1008,6 +1075,7 @@ async def extract_form(document: str, form: dict[str, Any], header: dict[str, An
     return {**first, "values": values, "images": len(images),
             "second_read": second_model if second is not None else None,
             "primary_read": primary,
+            "form_titles": titles,
             "usage": _merge_usage(usages)}
 
 

@@ -151,6 +151,10 @@ const state = {
   signature: null,       // {full_name, meaning, signed_at}
   submitted: null,       // {submitted_at, submitted_by}
   serverReadOnly: false, // readonly as the server sees it (role, submitted, lease)
+  lock: null,            // this person's record lock {username, full_name, since, mine}
+  lockedBy: null,        // someone else's lock on this record — read-only while held
+  reopenRequired: false, // submitted: "Process again" with remarks before changing it
+  archived: null,        // {at, by, reason} when the record is archived
 };
 
 const STAGE_ORDER = ["upload", "queue", "read", "finish", "fields"];
@@ -678,10 +682,13 @@ function showResult(data, landing, options = {}) {
 /* Who this review is on the server. Kept apart from resetMapping(): a fresh
    upload resets the mapping on its way to the viewer but keeps its document. */
 function resetReviewIdentity() {
+  stopLock();
   state.docId = null;
   state.extractionId = null;
   state.serverReadOnly = false;
   state.submitted = null;
+  state.reopenRequired = false;
+  state.archived = null;
   if (state.readOnly) setReadOnly(false);
 }
 
@@ -954,24 +961,300 @@ const TAB_BANNER_TEXT = els.tabBanner ? els.tabBanner.textContent.trim() : "";
 /* Two reasons a review is read-only: another tab holds it (the lease below),
    or the server says so (a monitor, or a record that is not this reviewer's
    to change). The server's word is not undone by the tab lease. */
+/* `on` is the tab lease (another tab has this review). Called with no argument,
+   it keeps the lease as it is and re-applies the server's reasons: role,
+   archive, someone else's lock, a submitted record not yet reopened. */
+let tabLeaseHeld = false;
+
 function setReadOnly(on) {
-  state.readOnly = Boolean(on) || state.serverReadOnly;
+  if (on !== undefined) tabLeaseHeld = Boolean(on);
+  const held = Boolean(state.lockedBy) || state.reopenRequired;
+  state.readOnly = tabLeaseHeld || state.serverReadOnly || held;
   document.body.classList.toggle("read-only", state.readOnly);
   if (els.tabBanner) {
     els.tabBanner.classList.toggle("hidden", !state.readOnly);
-    els.tabBanner.textContent = state.serverReadOnly
-      ? readOnlyReason()
-      : TAB_BANNER_TEXT;
+    els.tabBanner.textContent = "";
+    els.tabBanner.dataset.kind = readOnlyKind(held);
+    els.tabBanner.appendChild(bannerIcon());
+    if (state.serverReadOnly || held) {
+      const text = document.createElement("span");
+      text.className = "tab-banner-text";
+      text.textContent = readOnlyReason();
+      els.tabBanner.appendChild(text);
+      bannerActions().forEach((action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn btn-quiet tab-banner-action";
+        button.textContent = action.label;
+        button.addEventListener("click", action.onClick);
+        els.tabBanner.appendChild(button);
+      });
+    } else {
+      const text = document.createElement("span");
+      text.className = "tab-banner-text";
+      text.textContent = TAB_BANNER_TEXT;
+      els.tabBanner.appendChild(text);
+    }
   }
   const layer = edc();
   if (layer && layer.readOnlyChanged) layer.readOnlyChanged(state.readOnly);
 }
 
+/* The banner's tone follows why the page is read-only: someone else holds it
+   (lock or another tab), the reader's role, or the record's own state. */
+function readOnlyKind(held) {
+  const role = state.user && state.user.role;
+  if (state.archived) return "archived";
+  if (state.serverReadOnly && role === "monitor") return "monitor";
+  if (state.lockedBy || (tabLeaseHeld && !state.serverReadOnly && !held)) return "lock";
+  if (state.reopenRequired || state.submitted) return "submitted";
+  return "lock";
+}
+
+function bannerIcon() {
+  const icon = document.createElement("span");
+  icon.className = "tab-banner-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none">'
+    + '<rect x="5" y="10.5" width="14" height="9.5" rx="2" stroke="currentColor" stroke-width="1.8"/>'
+    + '<path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  return icon;
+}
+
+function canWrite() {
+  const role = state.user && state.user.role;
+  return role === "reviewer" || role === "admin";
+}
+
+function shortStamp(iso) {
+  const d = new Date(iso || "");
+  if (Number.isNaN(d.getTime())) return "";
+  // UTC, like the signature line beside it in the top bar, so the banner and the
+  // signature never show two different clocks.
+  const iso8601 = d.toISOString();
+  return `${formatDate(iso8601.slice(0, 10))} ${iso8601.slice(11, 16)} UTC`;
+}
+
 function readOnlyReason() {
   const role = state.user && state.user.role;
+  if (state.archived) {
+    const a = state.archived;
+    return `Archived by ${a.by || "—"} on ${shortStamp(a.at)}: ${a.reason || "no reason given"}. ` +
+      "Restore it to work on it again.";
+  }
   if (role === "monitor") return "You're viewing this review as a monitor. Values can't be changed here.";
+  if (state.lockedBy) {
+    const who = state.lockedBy.full_name || state.lockedBy.username;
+    return `In use by ${who} since ${shortStamp(state.lockedBy.since)}. It's read-only here until ` +
+      "they close it — this page picks it up by itself when they do.";
+  }
+  if (state.reopenRequired) {
+    const sub = state.submitted || {};
+    const when = sub.submitted_at ? ` on ${shortStamp(sub.submitted_at)}` : "";
+    const who = sub.submitted_by ? ` by ${sub.submitted_by}` : "";
+    return `Already processed and submitted to the EDC${when}${who}. To change it, choose ` +
+      "“Process again” and enter remarks.";
+  }
   if (state.submitted) return "This review has been submitted and is open read-only.";
   return "This review is open read-only.";
+}
+
+function bannerActions() {
+  const out = [];
+  if (!state.docId) return out;
+  const role = state.user && state.user.role;
+  if (state.archived && canWrite()) out.push({ label: "Restore…", onClick: restoreRecord });
+  else if (state.lockedBy && role === "admin") out.push({ label: "Release lock", onClick: forceRelease });
+  else if (state.reopenRequired && canWrite() && !state.lockedBy) {
+    out.push({ label: "Process again…", onClick: processAgain });
+  }
+  return out;
+}
+
+/* ------------------------------------------------- record lock (one editor)
+
+   The server gives the record's lock to the first writer who opens it. This
+   page renews it while open and gives it back on close; anyone else gets the
+   record read-only, and their page keeps asking, so it opens up by itself
+   once the first person leaves. */
+
+let lockTimer = null;
+let lockDocId = null;
+
+function lockPath(id) {
+  return `/api/docs/${encodeURIComponent(id)}/lock`;
+}
+
+function stopLock({ release = true } = {}) {
+  clearInterval(lockTimer);
+  lockTimer = null;
+  const id = lockDocId;
+  lockDocId = null;
+  if (release && id && state.lock && state.lock.mine) {
+    // keepalive: still delivered when the page is closing.
+    fetch(lockPath(id), { method: "DELETE", credentials: "same-origin", keepalive: true })
+      .catch(() => {});
+  }
+  state.lock = null;
+  state.lockedBy = null;
+}
+
+function applyLock(lock) {
+  if (lock && !lock.mine) {
+    const hadIt = Boolean(state.lock && state.lock.mine);
+    state.lockedBy = lock;
+    state.lock = null;
+    if (hadIt) {
+      toast(`${lock.full_name || lock.username} has this record now. It's read-only here; ` +
+        "your last changes stay saved on this device.", "error", 7000);
+    }
+  } else {
+    const was = state.lockedBy;
+    state.lockedBy = null;
+    state.lock = lock || null;
+    if (was) {
+      toast(`${was.full_name || was.username} closed this record — you can edit it now.`, "success", 4200);
+    }
+  }
+  setReadOnly();
+}
+
+async function renewLock() {
+  const id = lockDocId;
+  if (!id || state.docId !== id) return;
+  try {
+    const res = await api(lockPath(id), { method: "POST" });
+    if (lockDocId !== id) return;
+    applyLock(res.lock);
+  } catch (error) {
+    if (lockDocId !== id) return;
+    if (error.status === 409) {
+      // Archived or submitted elsewhere meanwhile: reopen to see it as it is.
+      stopLock({ release: false });
+      toast(error.message, "error", 6000);
+    }
+    // Anything else (offline, a blip) is retried on the next beat.
+  }
+}
+
+function startLock(id, lock, renewSeconds) {
+  stopLock({ release: false });
+  if (!id || !canWrite() || state.archived || state.reopenRequired) return;
+  lockDocId = id;
+  applyLock(lock);
+  const every = Math.max(10, Number(renewSeconds) || 40) * 1000;
+  lockTimer = setInterval(renewLock, every);
+}
+
+/* Called when a save is refused because someone else holds the record. */
+function lostLock(lock) {
+  if (lock) applyLock({ ...lock, mine: false });
+  else setReadOnly();
+}
+
+window.addEventListener("pagehide", () => stopLock());
+
+async function forceRelease() {
+  const id = state.docId;
+  const who = state.lockedBy ? state.lockedBy.full_name || state.lockedBy.username : "they";
+  const ui = window.WH && window.WH.ui;
+  if (ui && ui.confirm) {
+    const ok = await ui.confirm({
+      title: "Release this lock?",
+      message: `${who} may still have it open. Their unsaved changes stay on their device and ` +
+        "their next save is refused. The release is recorded in the audit trail.",
+      confirmLabel: "Release lock",
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  try {
+    await api(`${lockPath(id)}?force=true`, { method: "DELETE" });
+    await renewLock();
+    toast("Lock released", "success", 2400);
+  } catch (error) {
+    toast(error.message, "error", 5000);
+  }
+}
+
+/* --------------------------------------- process a submitted record again */
+
+const PROCESS_AGAIN_PICKS = [
+  "Values were corrected on the source",
+  "A value was entered wrongly",
+  "Query response from the monitor",
+  "Other",
+];
+
+async function processAgain() {
+  const id = state.docId;
+  const ui = window.WH && window.WH.ui;
+  if (!id || !ui || !ui.confirm) return;
+  const sub = state.submitted || {};
+  const result = await ui.confirm({
+    title: "Process this record again?",
+    message: `It was already submitted to the EDC${sub.submitted_at ? ` on ${shortStamp(sub.submitted_at)}` : ""}` +
+      `${sub.submitted_by ? ` by ${sub.submitted_by}` : ""}. Processing it again lets you change ` +
+      "values and submit again; only values that differ from the EDC will be sent.",
+    confirmLabel: "Process again",
+    reason: { label: "Remarks", picks: PROCESS_AGAIN_PICKS },
+  });
+  if (!result) return; // cancelled: nothing changes
+  try {
+    const res = await api(`/api/docs/${encodeURIComponent(id)}/reopen`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: result.reason }),
+    });
+    if (state.docId !== id) return;
+    state.reopenRequired = false;
+    startLock(id, res.lock, res.lock && res.lock.renew_seconds);
+    setReadOnly();
+    // Processing again is the intent to submit again: the button is live again
+    // (an unchanged record then submits as "nothing needed sending").
+    state.edcSaved = false;
+    resetSubmitButton();
+    toast("Open for changes — your remarks are in the audit trail", "success", 4200);
+  } catch (error) {
+    if (error.status === 423 && error.data && error.data.detail && error.data.detail.lock) {
+      lostLock(error.data.detail.lock);
+    }
+    toast(error.message, "error", 6000);
+  }
+}
+
+async function restoreRecord() {
+  const id = state.docId;
+  const ui = window.WH && window.WH.ui;
+  if (!id || !ui || !ui.confirm) return;
+  const result = await ui.confirm({
+    title: "Restore this record?",
+    message: "It goes back on the work list and can be changed again.",
+    confirmLabel: "Restore",
+    reason: { label: "Why restore it?", picks: ["Archived by mistake", "Belongs to this site after all", "Other"] },
+  });
+  if (!result) return;
+  try {
+    await api(`/api/docs/${encodeURIComponent(id)}/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: result.reason }),
+    });
+    toast("Restored", "success", 2400);
+    if (state.docId === id) {
+      state.result = null; // force a fresh open with the new state
+      openReview(id);
+    }
+  } catch (error) {
+    toast(error.message, "error", 6000);
+  }
+}
+
+/* After a signed submit: the record is now "already processed". */
+function submittedNow() {
+  stopLock();
+  state.reopenRequired = true;
+  setReadOnly();
 }
 
 function wireTabLease(jobId) {
@@ -1343,7 +1626,19 @@ function setStep(step) {
   els.extractedNote.textContent =
     step === "extract" ? "Always check against the original"
       : step === "header" ? "Confirm these match the page"
-        : "Pink boxes were used · purple is the field you have selected";
+        : "";
+  if (step === "form") {
+    // A legend for the boxes on the original, rather than a sentence about colours.
+    [["is-read", "Read from the page"], ["is-focus", "Selected field"]].forEach(([cls, label]) => {
+      const key = document.createElement("span");
+      key.className = "hl-key";
+      const swatch = document.createElement("i");
+      swatch.className = `hl-swatch ${cls}`;
+      swatch.setAttribute("aria-hidden", "true");
+      key.append(swatch, document.createTextNode(label));
+      els.extractedNote.appendChild(key);
+    });
+  }
 
   refreshHighlights();
 
@@ -1374,7 +1669,7 @@ const STATUS_ICONS = {
     + '<path d="M12 11v5.5M12 7.5v.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
 };
 
-function statusNode({ kind = "info", title = "", detail = "", action = null }) {
+function statusNode({ kind = "info", title = "", detail = "", action = null, list = null }) {
   const node = document.createElement("div");
   node.className = `status status--${kind}`;
   node.setAttribute("role", kind === "error" || kind === "warn" ? "alert" : "status");
@@ -1392,6 +1687,24 @@ function statusNode({ kind = "info", title = "", detail = "", action = null }) {
     text.className = "status-detail";
     text.textContent = detail;
     body.appendChild(text);
+  }
+  if (list && list.length) {
+    // Items are { label, meta } from the server or the document: text only.
+    const ul = document.createElement("ul");
+    ul.className = "status-list";
+    list.forEach((item) => {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = item.label;
+      li.appendChild(label);
+      if (item.meta) {
+        const meta = document.createElement("small");
+        meta.textContent = item.meta;
+        li.appendChild(meta);
+      }
+      ul.appendChild(li);
+    });
+    body.appendChild(ul);
   }
   node.append(icon, body);
   if (action) {
@@ -2263,6 +2576,23 @@ function renderForm(payload) {
         "values can't be boxed on the original. Choose High or Maximum Accuracy to see them.",
       "info"
     );
+  }
+  const missingForms = (payload.missing_forms || []).filter((f) => f && f.title);
+  if (missingForms.length) {
+    const visit = (form.edc && form.edc.visitName) || "this visit";
+    const one = missingForms.length === 1;
+    const node = statusNode({
+      kind: "warn",
+      title: one
+        ? "A form on the scan isn't in the EDC for this visit"
+        : `${missingForms.length} forms on the scan aren't in the EDC for this visit`,
+      detail: `${one ? "It is" : "They are"} on the scan but not set up in the EDC for ${visit}. ` +
+        `${one ? "Its" : "Their"} values were not read and won't be sent. The other forms ` +
+        "below can be reviewed and submitted as usual.",
+      list: missingForms.map((f) => ({ label: f.title, meta: f.page ? `p. ${f.page}` : "" })),
+    });
+    node.classList.add("status--missing-forms");
+    els.formSections.prepend(node);
   }
   (form.sections || []).forEach((section) => {
     const card = document.createElement("details");
@@ -3528,6 +3858,10 @@ function applyReviewSnapshot(id, snap, bytes) {
     : (doc.extraction && doc.extraction.id) || null;
   state.serverReadOnly = Boolean(snap.readonly);
   state.submitted = snap.submitted || null;
+  state.archived = doc.archived || null;
+  state.reopenRequired = Boolean(snap.reopen_required);
+  state.lock = null;
+  state.lockedBy = null;
   state.fileBytes = bytes || null;
   state.savedName = (snap.result && snap.result.filename) || doc.filename || null;
   state.startedAt = Date.now();
@@ -3561,8 +3895,11 @@ function applyReviewSnapshot(id, snap, bytes) {
       "reviewed; boxes and source images need the page.";
   }
   wireTabLease(result.job_id);
+  // Ours: renewed while open. Someone else's: asked again on the same beat, so
+  // the record opens up here by itself when they leave.
+  startLock(id, snap.lock, snap.lock && snap.lock.renew_seconds);
   // Applies the server's read-only flag even where BroadcastChannel is absent.
-  setReadOnly(state.readOnly);
+  setReadOnly();
 
   enableStep("header");
   if (state.header) {
@@ -3620,6 +3957,7 @@ window.ReviewCore = {
   selectField, rowFor, fieldByKey, allFields, rerenderField, refreshMetaFor,
   useAlternateRead, cutCrops, markSavedToEdc, resetSubmitButton,
   saveSession, saveSessionNow, cssEscape, formatDate, openReview,
+  lostLock, submittedNow, setReadOnly,
   STATUS_ICONS, ISSUE_TEXT, READING_ISSUES, CHECK_ISSUES, HARD_ISSUES,
 };
 

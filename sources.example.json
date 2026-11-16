@@ -4,7 +4,9 @@
       "id": "desktop",
       "name": "eSource",
       "kind": "local",
-      "location": "~/Desktop/eSource"
+      "location": "~/Desktop/eSource",
+      "study": "ICR-23-001",
+      "site": "01"
     }
   ]
 }

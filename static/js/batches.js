@@ -19,6 +19,15 @@
     { id: "done", label: "Done" },
   ];
 
+  /* The folder a file sits in; the name itself is already the row title. */
+  function folderOf(item) {
+    const path = String(item.path || "");
+    const name = String(item.filename || "");
+    if (!name || !path || path === name) return "";
+    if (path.endsWith(name)) return path.slice(0, -name.length).replace(/[\\/]+$/, "");
+    return path;
+  }
+
   const isRunning = (b) => b && !b.done && !b.cancelled;
   const finishedCount = (c = {}) => (c.ready || 0) + (c.failed || 0) + (c.cancelled || 0) + (c.needs_input || 0);
 
@@ -107,7 +116,7 @@
         h("a", { class: ["wh-batch-card", isRunning(b) && "is-running"], href: `#/batches/${encodeURIComponent(b.id)}` },
           h("div", { class: "wh-batch-card-head" },
             h("span", { class: "wh-batch-num" }, `#${b.number || b.id}`),
-            h("strong", { class: "wh-batch-label" }, b.label || "Scan"),
+            h("strong", { class: "wh-batch-label", title: b.label || "Scan" }, b.label || "Scan"),
             ui.chip(batchStatus(b), { size: "sm" })),
           stackedBar(b),
           h("div", { class: "wh-batch-card-foot" },
@@ -320,7 +329,8 @@
           ? "Waiting to start"
           : current ? `${current} (${idx + 1} of ${STAGES.length}) — ${ui.statusInfo(item.status).label.toLowerCase()}` : ui.statusInfo(item.status).label;
       ol.setAttribute("aria-label", summary);
-      return ol;
+      const caption = item.status === "ready" ? "Done" : item.status === "queued" ? "Waiting" : current || ui.statusInfo(item.status).label;
+      return h("div", { class: "wh-stage-wrap" }, ol, h("span", { class: ["wh-stage-caption", `is-${item.status}`], "aria-hidden": "true" }, caption));
     }
 
     function renderItems() {
@@ -366,16 +376,20 @@
         const duration = item.started_at
           ? WH.fmt.duration(((WH.parseDate(item.finished_at) || new Date()) - WH.parseDate(item.started_at)) / 1000)
           : "—";
-        tbody.appendChild(h("tr", { class: ["wh-row", `is-${item.status}`] },
+        tbody.appendChild(h("tr", { class: ["wh-row", `is-${item.status}`, item.error && "has-error"] },
           h("td", { class: "wh-col-doc" },
             h("span", { class: "wh-doc-title" }, item.filename || item.path),
-            h("span", { class: "wh-doc-sub", title: item.path }, item.path || ""),
-            item.error && h("span", { class: "wh-row-error", role: "note" }, ui.icon("alert-circle", { size: 13 }), item.error)),
+            folderOf(item) && h("span", { class: "wh-doc-sub", title: item.path }, ui.icon("folder", { size: 12 }), folderOf(item))),
           h("td", { class: "wh-col-stages" }, stageDots(item)),
           h("td", null, ui.chip(item.status, { size: "sm" })),
           h("td", { class: "wh-col-conf" }, ui.confidence(item.confidence)),
           h("td", { class: "wh-col-num wh-muted" }, duration),
           h("td", { class: "wh-col-actions" }, actions)));
+        // The reason gets the full row width underneath, so it stays readable.
+        if (item.error) {
+          tbody.appendChild(h("tr", { class: ["wh-batch-error-row", `is-${item.status}`] },
+            h("td", { colspan: "6" }, h("span", { class: "wh-row-error", role: "note" }, ui.icon("alert-circle", { size: 13 }), item.error))));
+        }
       });
       itemsEl.appendChild(h("table", { class: "wh-table wh-batch-table", "aria-label": "Files in this batch" },
         h("thead", null, h("tr", null,

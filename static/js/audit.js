@@ -74,7 +74,9 @@
     const newPill = h("button", { type: "button", class: "wh-new-pill", hidden: true, onClick: () => load() }, ui.icon("arrow-right", { size: 14 }), "New events — show");
     const filterBar = h("div", { class: "wh-filterbar", role: "search", "aria-label": "Filter the audit trail" },
       search, userInput, actionSelect, subjectInput, docInput,
-      h("span", { class: "wh-daterange" }, fromInput, h("span", { "aria-hidden": "true" }, "–"), toInput),
+      h("span", { class: "wh-daterange", role: "group", "aria-label": "Date range" },
+        h("span", { class: "wh-daterange-label", "aria-hidden": "true" }, "From"), fromInput,
+        h("span", { class: "wh-daterange-label", "aria-hidden": "true" }, "to"), toInput),
       clearBtn);
     const listEl = h("div", { class: "wh-audit-list" });
     const sentinel = h("div", { class: "wh-sentinel", "aria-hidden": "true" });
@@ -253,7 +255,7 @@
         type: "button",
         class: "wh-audit-row",
         dataset: { seq: String(ev.seq) },
-        "aria-label": `${WH.fmt.humanize(ev.action)} by ${ev.full_name || ev.username || "system"} at ${WH.fmt.time(ev.ts, true)}. Open details.`,
+        "aria-label": `${WH.fmt.humanize(ev.action)} by ${ev.full_name || ev.username || "system"} at ${WH.fmt.time(ev.ts, true)}.${delivery && delivery !== "sent" ? ` EDC delivery ${ui.statusInfo(delivery).label.toLowerCase()}.` : ""} Open details.`,
         onClick: () => openDetail(ev),
       },
       h("span", { class: "wh-audit-time" }, h("time", { datetime: ev.ts, title: WH.fmt.both(ev.ts) }, WH.fmt.time(ev.ts, true))),
@@ -265,7 +267,14 @@
           target && h("span", { class: "wh-audit-target" }, target)),
         change,
         ev.reason && h("span", { class: "wh-audit-reason" }, ui.icon("pen", { size: 11 }), ev.reason)),
-      delivery && delivery !== "sent" ? ui.chip(delivery, { size: "sm", title: "EDC delivery" }) : null,
+      // Failed deliveries stand out; pending/held ones (often every row while
+      // delivery is held) get a quiet marker so they don't drown the trail.
+      delivery && delivery !== "sent"
+        ? delivery === "failed"
+          ? ui.chip(delivery, { size: "sm", title: "EDC delivery failed" })
+          : h("span", { class: `wh-audit-deliv wh-audit-deliv--${delivery}`, title: `EDC delivery: ${ui.statusInfo(delivery).label}` },
+              ui.icon(ui.statusInfo(delivery).icon, { size: 12 }), ui.statusInfo(delivery).label)
+        : null,
       h("span", { class: "wh-audit-seq" }, `#${ev.seq}`));
       return h("li", null, btn);
     }

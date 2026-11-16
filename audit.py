@@ -38,6 +38,8 @@ ACTIONS = {
     "user.created", "user.updated", "user.disabled", "user.password_changed",
     "source.browsed", "file.ingested", "file.duplicate_detected", "file.reprocess_declined",
     "document.version_added", "document.assigned", "document.viewed", "document.relinked",
+    "document.archived", "document.restored", "document.reopened", "document.lock_released",
+    "access.denied",
     "batch.created", "batch.cancelled",
     "extraction.queued", "extraction.started", "extraction.completed", "extraction.failed",
     "extraction.cancelled", "extraction.retried",

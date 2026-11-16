@@ -33,11 +33,20 @@ without the Cronos duty and 503 if Cronos can't confirm it; `duty.denied` is aud
 a delegated right adds `duty`, `duty_source`, `delegation_id` and `on_behalf_of` to the
 `draft.saved`, `signature.applied` and `edc.*` event details.
 
+### Study/site scope (`AUTH_MODE=cronos`)
+
+People signed in through Cronos see only what their Cronos assignments (projectId/
+projectName, siteId/siteName, kept from sign-in) cover: source folders whose `study`/`site`
+tags in `sources.json` match, the records scanned from them, uploads they made or of their
+studies, and those records' audit events. A record or batch outside their scope answers
+**404** on every route, as if it did not exist. Admins, local accounts and
+`CRONOS_SITE_SCOPE=false` see everything. A folder with no `study` tag is admin-only.
+
 ## Sources (file server)
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/sources` | → `{sources:[{id, name, kind, location}]}` |
+| GET | `/sources` | → `{sources:[{id, name, kind, location, study, site}]}` (only those in scope) |
 | GET | `/sources/{id}/browse?path=` | → `{source:{id,name}, path, parent, breadcrumbs:[{name,path}], entries:[Entry], truncated}` |
 
 `Entry = {name, path, type:"dir"|"pdf", size, modified, status, document_id}` where
@@ -63,30 +72,46 @@ differs), `"processing"`, `"failed"`.
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/docs?status=&q=&protocol=&subject=&assignee=&flagged=&limit=&offset=` | → `{documents:[Doc], total, counts:{processing, ready, in_review, submitted, failed}}` |
+| GET | `/docs?status=&q=&protocol=&subject=&assignee=&flagged=&archived=&limit=&offset=` | → `{documents:[Doc], total, counts:{processing, ready, in_review, submitted, failed, needs_input, archived}}`. Archived records are left out unless `archived=true`, which lists only them. Each Doc carries `lock`. |
 | GET | `/docs/{id}` | → `{document: Doc}` |
 | GET | `/docs/{id}/review` | → Review snapshot (below). Opening is audited. |
 | GET | `/docs/{id}/file?version=` | PDF bytes (`application/pdf`) |
 | POST | `/docs/{id}/assign` | `{username|null}` → `{document}` |
 | GET | `/docs/{id}/history` | → `{versions:[{version, sha256, created_at, created_by, reason}], extractions:[{id, version, run, status, created_at, created_by, models, reason}], drafts:[{revision, saved_at, saved_by, autosave, edits:int}], submissions:[{id, submitted_at, submitted_by, status, changes:[…], skipped, signature:{full_name, meaning, signed_at}}]}` |
 | GET | `/docs/{id}/diff?a=&b=` | `a`,`b` are draft revisions; `0` is the AI result of the current extraction. → `{a, b, changes:[{key, label, crf, a, b}]}` |
-| POST | `/docs/{id}/reprocess` | `{reason}` → `{extraction_id}` |
+| POST | `/docs/{id}/reprocess` | `{reason}` → `{extraction_id}`. On a submitted record this also counts as processing it again. |
+| POST | `/docs/{id}/lock` | Take or renew this person's edit lock. → `{acquired, lock:Lock}`. 409 archived / submitted-not-reopened. |
+| DELETE | `/docs/{id}/lock?force=` | Give it back → `{released}`. `force=true`: admin releases anyone's (audited `document.lock_released`). |
+| POST | `/docs/{id}/archive` | `{reason}` (required) → `{document}`. Off the work list, read-only, nothing deleted. 423 if someone else has it open. |
+| POST | `/docs/{id}/restore` | `{reason}` (required) → `{document}` |
+| POST | `/docs/{id}/reopen` | `{reason}` (required remarks) → `{document, lock}`. "Process again" for a submitted record; 409 if it was never submitted. |
 | POST | `/docs/{id}/draft` | `{payload, base_revision, edits:[Edit], autosave}` → `{revision, saved_at}`. 409 when `base_revision` is stale. Never contacts the EDC. |
-| POST | `/docs/{id}/preflight` | `{payload}` → `{changes:[{crfName, fieldName, label, old, new}], skipped:[{crfName, label, value}], warnings:[str], blocked:[{key,label,reason}], diff_sha}` — reads the EDC fresh. |
+| POST | `/docs/{id}/preflight` | `{payload}` → `{changes:[{crfName, fieldName, label, old, new}], skipped:[{crfName, label, value}], warnings:[str], blocked:[{key,label,reason}], diff_sha}` — reads the EDC fresh. `warnings` names any form on the scan the EDC visit has no CRF for (`payload.missing_forms`). |
 | POST | `/docs/{id}/submit` | `{payload, crops, password, meaning, diff_sha, edits:[Edit]}` → `{status:"sent"|"unchanged", counts, delta, warnings, signature:{full_name, meaning, signed_at}}`. 401 wrong password (no sign-out), 409 the EDC changed since preflight. |
 
-`Doc = {id, filename, path, source_id, status:"processing"|"ready"|"in_review"|"submitted"|"failed"|"needs_input", protocol_no, screening_no, visit_name, flags, conflicts, confidence, assignee, updated_at, current_version, extraction:{id, status, stage, error}, draft_revision}`
+`Doc = {id, filename, path, source_id, status:"processing"|"ready"|"in_review"|"submitted"|"failed"|"needs_input", protocol_no, screening_no, visit_name, flags, conflicts, confidence, assignee, updated_at, current_version, extraction:{id, status, stage, error}, draft_revision, archived:{at, by, reason}|null, reopened:{at, by}|null, lock:Lock|null}`
+
+`Lock = {username, full_name, since, mine, renew_seconds}`. Opening a review as a reviewer or
+admin takes the lock; the screen renews it every `renew_seconds` and releases it on close; it
+lapses after `RECORD_LOCK_SECONDS` (120) without renewal. While someone else holds it, draft,
+preflight, submit, reprocess and archive answer **423** `{detail:{message, lock}}`.
+
+A record with a sent/unchanged submission is **already processed**: draft, preflight and
+submit answer **409** until `/reopen` is called with remarks (or `/reprocess` with a reason).
+An archived record answers **409** to every change until restored.
 
 `Edit = {key, label, old, new, reason_code, reason_text, kind:"edit"|"alternate"|"verify"}`
 
 Review snapshot (the browser's restore shape, so the review screen opens it like a
 saved session):
 ```
-{ document: Doc, job_id, extraction_id, readonly:bool,
+{ document: Doc, job_id, extraction_id, readonly:bool,   // monitor, or archived
   result: {job_id, status:"COMPLETED", filename, page_count, mode:"vision", document_id, ...},
   header: <POST /documents/{job}/header response> | null,
   visit: <POST /documents/{job}/visit response> | null,
-  payload: <map payload or latest draft payload> | null,
+  payload: <map payload or latest draft payload> | null,   // payload.missing_forms: [{title, page}]
+  reopen_required:bool,   // submitted; "Process again" first
+  lock: Lock | null,      // whoever holds the edit lock (mine=false → open read-only)
   draft: {revision, saved_at, saved_by} | null,
   submitted: {submitted_at, submitted_by} | null,
   reader: {model, second_read, preferred} }

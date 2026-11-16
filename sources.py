@@ -5,8 +5,15 @@ sources.json), never from the browser:
 
     {"sources": [
         {"id": "site04", "name": "ICR-23-001 · Site 04", "kind": "local",
-         "location": "/mnt/fileserver/ICR-23-001/Site04"}
+         "location": "/mnt/fileserver/ICR-23-001/Site04",
+         "study": "ICR-23-001", "site": "04"}
     ]}
+
+`study` and `site` say whose folder it is, in Cronos terms: `study` matches a
+Cronos assignment's projectId or projectName, `site` its siteId or siteName
+(case-insensitive). People signing in through Cronos see a folder only when one
+of their assignments matches it (see access.py); a folder without `study` is
+visible to administrators only. `site` left out = every site of that study.
 
 `kind: "local"` covers any path the server can read. `~/Desktop/eSource` is the
 portable one: `~` is whoever is running the app, and a missing folder under
@@ -54,6 +61,8 @@ class Connector(Protocol):
     id: str
     name: str
     kind: str
+    study: Optional[str]
+    site: Optional[str]
 
     def describe(self) -> str: ...
     async def list_dir(self, rel: str) -> tuple[list[Entry], bool]: ...
@@ -84,9 +93,11 @@ def _hidden(name: str) -> bool:
 class LocalConnector:
     kind = "local"
 
-    def __init__(self, id: str, name: str, location: str) -> None:
+    def __init__(self, id: str, name: str, location: str, study: Optional[str] = None,
+                 site: Optional[str] = None) -> None:
         self.id, self.name = id, name
         self.root = Path(location).expanduser()
+        self.study, self.site = study or None, site or None
 
     def describe(self) -> str:
         """A path another computer can use. A folder under this account's home
@@ -246,8 +257,14 @@ def load() -> dict[str, Connector]:
         if not cls or not item.get("id") or not item.get("location"):
             continue
         out[str(item["id"])] = cls(str(item["id"]), str(item.get("name") or item["id"]),
-                                   str(item["location"]))
+                                   str(item["location"]),
+                                   study=_tag(item.get("study")), site=_tag(item.get("site")))
     return out
+
+
+def _tag(value: Any) -> Optional[str]:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def get(source_id: str) -> Connector:
@@ -258,4 +275,5 @@ def get(source_id: str) -> Connector:
 
 
 def summary(conn: Connector) -> dict[str, Any]:
-    return {"id": conn.id, "name": conn.name, "kind": conn.kind, "location": conn.describe()}
+    return {"id": conn.id, "name": conn.name, "kind": conn.kind, "location": conn.describe(),
+            "study": getattr(conn, "study", None), "site": getattr(conn, "site", None)}

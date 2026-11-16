@@ -648,7 +648,6 @@
 :root[data-theme="dark"] .menu,
 :root[data-theme="dark"] .login-card,
 :root[data-theme="dark"] .file-card,
-:root[data-theme="dark"] .status,
 :root[data-theme="dark"] .btn-quiet {
   background: var(--rv-surface);
   color: var(--rv-ink);
@@ -667,26 +666,8 @@
   color: var(--rv-ink);
   border-color: var(--rv-line-2);
 }
-:root[data-theme="dark"] .status--loading { background: var(--rv-surface-3); }
-:root[data-theme="dark"] .status--success { background: var(--rv-ok-soft); border-color: transparent; }
-:root[data-theme="dark"] .status--warn { background: var(--rv-warn-soft); border-color: transparent; }
-:root[data-theme="dark"] .status--warn .status-title { color: var(--rv-warn-ink); }
-:root[data-theme="dark"] .status--error { background: var(--rv-bad-soft); border-color: transparent; }
-:root[data-theme="dark"] .status--error .status-title { color: var(--rv-bad-ink); }
-:root[data-theme="dark"] .status--info { background: #1a2240; border-color: transparent; }
-:root[data-theme="dark"] .status--info .status-title { color: #a9bfff; }
-:root[data-theme="dark"] .chips span,
-:root[data-theme="dark"] .evidence { background: var(--rv-surface-3); color: var(--rv-muted); }
-:root[data-theme="dark"] .confidence { background: var(--rv-ok-soft); color: var(--rv-ok-ink); }
-:root[data-theme="dark"] .confidence.low { background: var(--rv-warn-soft); color: var(--rv-warn-ink); }
-:root[data-theme="dark"] .issue { color: var(--rv-warn-ink); }
-:root[data-theme="dark"] .issue.hard { color: var(--rv-bad-ink); }
-:root[data-theme="dark"] .second-read,
-:root[data-theme="dark"] .struck { color: var(--rv-ink-2); }
-:root[data-theme="dark"] .edited,
-:root[data-theme="dark"] .reason-tag { color: var(--rv-accent-ink); }
-:root[data-theme="dark"] .reason-tag.is-default { color: var(--rv-warn-ink); }
-:root[data-theme="dark"] .tab-banner { background: var(--rv-warn-soft); color: var(--rv-warn-ink); border-color: transparent; }
+/* Status strips, confidence, flags, reason tags and the read-only banner take
+   their colours from the shell's tone tokens (styles.css), which flip here. */
 :root[data-theme="dark"] .form-skeleton .sk-row,
 :root[data-theme="dark"] .sk-line,
 :root[data-theme="dark"] .sk-block {
@@ -700,3 +681,115 @@
 
 .rv-skel.rv-sk-title { height: auto; width: auto; margin: 4px 0; background: none; animation: none; }
 .rv-skel.rv-sk-title .rv-sk { height: 16px; }
+
+/* ==========================================================================
+   Review polish: read-only banner, pane legend, flag rail layout, notices.
+   Colours come from the shell's tone tokens, so both themes follow.
+   ========================================================================== */
+
+/* Read-only banner — one line under the step tabs: icon, reason, action. */
+.viewer > .tab-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border-bottom: 1px solid var(--warn-line);
+}
+.viewer > .tab-banner.hidden { display: none; }
+.viewer > .tab-banner > .tab-banner-icon { flex: none; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px;
+  background: color-mix(in srgb, currentColor 12%, transparent); }
+.tab-banner-text { flex: 1 1 320px; min-width: 0; }
+.viewer > .tab-banner[data-kind="monitor"] { background: var(--info-bg); color: var(--info-ink); border-bottom-color: var(--info-line); }
+.viewer > .tab-banner[data-kind="submitted"],
+.viewer > .tab-banner[data-kind="archived"] { background: var(--neutral-bg); color: var(--neutral-ink); border-bottom-color: var(--neutral-line); }
+.viewer > .tab-banner .tab-banner-action {
+  flex: none;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
+  background: var(--surface);
+  color: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  box-shadow: none;
+}
+.viewer > .tab-banner .tab-banner-action:hover { border-color: currentColor; background: var(--surface); }
+.viewer > .tab-banner .tab-banner-action:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+/* Pane head: a legend for the boxes on the original. */
+.pane-head { align-items: center; min-height: 38px; }
+#extracted-note { display: inline-flex; align-items: center; gap: 14px; color: var(--text-3); }
+.hl-key { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.hl-swatch { width: 13px; height: 10px; border-radius: 2px; border: 2px solid var(--hl); background: var(--hl-fill); }
+.hl-swatch.is-focus { border-color: var(--purple); background: rgba(118, 82, 245, 0.32); }
+
+/* Step tabs: keyboard focus on the tab itself. */
+.stepper button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -4px; border-radius: 8px; }
+.stepper button.done:not(.active) { color: var(--text-2); }
+
+/* Flag rail: filters, then the shortcut hint, then prev/next — one row when
+   the pane is wide enough; the hint drops before anything wraps. */
+.pane-extracted .pane-body { container-type: inline-size; container-name: crf; }
+.rv-rail { box-shadow: var(--e2); border-color: var(--border); }
+.rv-rail-filters { order: 1; }
+.rv-rail-keys { order: 2; }
+.rv-rail-nav { order: 3; }
+.rv-rail-chip:hover { border-color: var(--border-2); background: var(--surface-2); }
+.rv-rail-chip.is-on { color: var(--accent-ink); }
+.rv-rail-step { display: inline-grid; place-items: center; }
+.rv-rail-step:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+@container crf (max-width: 680px) { .rv-rail-keys { order: 4; flex-basis: 100%; } }
+@container crf (max-width: 480px) { .rv-rail-keys { display: none; } }
+
+/* Missing-forms warning: the forms as a scannable list, not one long sentence. */
+.status-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.status-list li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--warn-line);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+.status-list li span { overflow-wrap: anywhere; }
+.status-list li small { color: var(--text-3); font-size: 10.5px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+/* Field rows: steadier label colour and a quieter page chip. */
+.field-label { color: var(--text-2); }
+.field-label .req { color: var(--danger); }
+
+/* Read-only: showing or hiding the boxes is a view setting, not an edit. */
+body.read-only #region-toggle { pointer-events: auto; opacity: 1; }
+
+/* The same list as plain lines (pre-flight warnings are sentences). */
+.status-list.is-lines { display: grid; gap: 6px; margin-top: 8px; padding-left: 16px; list-style: disc; }
+.status-list.is-lines li {
+  display: list-item;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+.status-list.is-lines li::marker { color: var(--text-3); }

@@ -638,7 +638,17 @@
         draft.dirty = true;
         draft.error = error.message;
         C.saveSessionNow(); // the device copy is the fallback, whatever went wrong
-        if (error.status === 409) {
+        const detail = error.data && error.data.detail;
+        if (error.status === 423) {
+          // Someone else has the record open: this page goes read-only.
+          setPill("error", "In use by someone else");
+          if (C.lostLock) C.lostLock(detail && detail.lock);
+          toast(error.message, "error", 6000);
+        } else if (error.status === 409 && !(detail && typeof detail === "object")) {
+          // Archived, or already submitted and not reopened: not a draft conflict.
+          setPill("error", "Read-only now");
+          toast(error.message, "error", 6000);
+        } else if (error.status === 409) {
           setPill("conflict");
           showConflict(error);
         } else if (error.offline || navigator.onLine === false) {
@@ -1192,7 +1202,20 @@
       layer.body.appendChild(box);
     }
 
-    pf.warnings.forEach((warning) => layer.body.appendChild(C.statusNode({ kind: "warn", title: String(warning) })));
+    // A few warnings stand alone; a longer run reads as one list rather than a
+    // stack of near-identical cards.
+    if (pf.warnings.length > 2) {
+      const node = C.statusNode({
+        kind: "warn",
+        title: `${pf.warnings.length} things to know before you sign`,
+        list: pf.warnings.map((warning) => ({ label: String(warning) })),
+      });
+      const items = node.querySelector(".status-list");
+      if (items) items.classList.add("is-lines");
+      layer.body.appendChild(node);
+    } else {
+      pf.warnings.forEach((warning) => layer.body.appendChild(C.statusNode({ kind: "warn", title: String(warning) })));
+    }
 
     const keys = keysForChanges(pf.changes);
     pf.keys = keys;
@@ -1469,6 +1492,8 @@
     setPill("saved");
     C.saveSessionNow();
     updateRail();
+    // Submitted: changing it from here on is "Process again", with remarks.
+    if (C.submittedNow) C.submittedNow();
 
     setTimeout(() => {
       closeAllLayers();

@@ -43,7 +43,7 @@
     const headSlot = h("div", null, ui.pageHeader({ eyebrow: "Document history", title: "Loading…" }));
     const compareSlot = h("div", { class: "wh-compare-slot" });
     const diffSlot = h("div", { class: "wh-diff-slot", "aria-live": "polite" });
-    const laneFilter = h("div", { class: "wh-status-filter", role: "group", "aria-label": "Show lanes" });
+    const laneFilter = h("div", { class: "wh-status-filter wh-lane-filter", role: "group", "aria-label": "Show lanes" });
     const timelineSlot = h("div", { class: "wh-card wh-lanes-card" });
     const body = h("div", { class: "wh-history" }, compareSlot, diffSlot, laneFilter, timelineSlot);
     root.append(headSlot, body);
@@ -80,6 +80,9 @@
       document.title = `${name} · History · eSource`;
       WH.shell.setCrumbs([WH.shell.section("inbox"), { label: name, href: `#/review/${encodeURIComponent(id)}` }, { label: "History" }]);
       const metaLine = [doc.screening_no && `Subject ${doc.screening_no}`, doc.visit_name, doc.protocol_no && `Protocol ${doc.protocol_no}`].filter(Boolean).join(" · ");
+      // The title already is the file name; show only the folder it sits in.
+      const path = String(doc.path || "");
+      const folder = path && path !== name && path.endsWith(name) ? path.slice(0, -name.length).replace(/[\\/]+$/, "") : path === name ? "" : path;
       const actions = [
         h("a", { class: "btn btn-quiet wh-btn", href: WH.router.href("/audit", { document_id: id }) }, ui.icon("shield", { size: 16 }), "Audit trail"),
       ];
@@ -92,7 +95,11 @@
       WH.clear(headSlot).appendChild(ui.pageHeader({
         eyebrow: "Document history",
         title: name,
-        sub: h("span", { class: "wh-head-meta" }, ui.chip(doc.status, { size: "sm" }), metaLine && h("span", null, metaLine), doc.path && h("span", { class: "wh-muted wh-ellipsis", title: doc.path }, doc.path)),
+        sub: h("span", { class: "wh-head-meta wh-history-meta" },
+          ui.chip(doc.status, { size: "sm" }),
+          doc.archived && ui.tag("Archived"),
+          metaLine && h("span", { class: "wh-history-meta-item" }, metaLine),
+          folder && h("span", { class: "wh-history-meta-item wh-history-folder wh-ellipsis", title: doc.path }, ui.icon("folder", { size: 14 }), folder)),
         actions,
       }));
     }
@@ -136,7 +143,7 @@
         h("span", { class: "wh-compare-icon" }, ui.icon("compare", { size: 18 })),
         h("span", { class: "wh-compare-label" }, "Compare"),
         selA,
-        ui.iconButton("arrow-right", "Swap", () => {
+        ui.iconButton("compare", "Swap the two revisions", () => {
           const t = selA.value;
           selA.value = selB.value;
           selB.value = t;
@@ -260,7 +267,9 @@
             renderLaneFilter();
             renderTimeline();
           },
-        }, ui.icon(lane.icon, { size: 13 }), lane.label, h("span", { class: "wh-toggle-count" }, String(counts[lane.id]))));
+          dataset: { lane: lane.id },
+          title: hiddenLanes.has(lane.id) ? `Show ${lane.label.toLowerCase()}` : `Hide ${lane.label.toLowerCase()}`,
+        }, h("span", { class: "wh-lane-swatch", "aria-hidden": "true" }), ui.icon(lane.icon, { size: 13 }), lane.label, h("span", { class: "wh-toggle-count" }, String(counts[lane.id]))));
       });
     }
 
@@ -308,7 +317,7 @@
           return h("article", { class: "wh-ev" },
             h("header", { class: "wh-ev-head" }, h("strong", null, `Run ${d.run != null ? d.run : d.id}`), ui.chip(d.status, { size: "sm" })),
             h("p", { class: "wh-ev-meta" }, `File version ${d.version}`, d.created_by ? ` · started by ${d.created_by}` : ""),
-            d.models && h("p", { class: "wh-ev-meta wh-muted" }, Array.isArray(d.models) ? d.models.join(", ") : typeof d.models === "object" ? Object.values(d.models).join(", ") : String(d.models)),
+            d.models && h("p", { class: "wh-ev-meta wh-muted" }, Array.isArray(d.models) ? d.models.join(", ") : typeof d.models === "object" ? [d.models.primary, d.models.secondary].filter(Boolean).join(", ") : String(d.models)),
             d.reason && h("p", { class: "wh-ev-reason" }, ui.icon("pen", { size: 12 }), d.reason));
         case "drafts": {
           const rev = String(d.revision);
@@ -360,6 +369,14 @@
       update(next) {
         const na = next.query.get("a");
         const nb = next.query.get("b");
+        const nextHidden = (next.query.get("hide") || "").split(",").filter(Boolean);
+        if (nextHidden.join(",") !== [...hiddenLanes].join(",")) {
+          hiddenLanes = new Set(nextHidden);
+          if (hist) {
+            renderLaneFilter();
+            renderTimeline();
+          }
+        }
         if (na !== a || nb !== b) {
           a = na;
           b = nb;

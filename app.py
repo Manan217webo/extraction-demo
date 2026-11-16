@@ -590,6 +590,15 @@ async def _owned_job(job_id: str, username: str,
         raise HTTPException(status_code=404, detail="That extraction could not be found.")
     if meta.get("owner") != username and not meta.get("document_id"):
         raise HTTPException(status_code=404, detail="That extraction could not be found.")
+    if meta.get("document_id") and meta.get("owner") != username:
+        # Shared work, but only within the person's study/site scope.
+        import access
+        user = await auth.get_user(username)
+        async with db.session() as session:
+            document = await session.get(db.Document, str(meta["document_id"]))
+        if user is None or document is None or \
+                not access.scope_for(user).sees_document(document):
+            raise HTTPException(status_code=404, detail="That extraction could not be found.")
     return meta
 
 
@@ -1312,6 +1321,13 @@ async def _map_job(job_id: str, header_edits: dict[str, Any],
     payload["reading"] = {"page_images": result.get("images", 0),
                           "primary_read": result.get("primary_read"),
                           "second_read": result.get("second_read")}
+    # Forms on the scan that the EDC visit doesn't have: their values have nowhere
+    # to go, so the reviewer is told rather than the form quietly disappearing.
+    titles = result.get("form_titles")
+    payload["missing_forms"] = visit_forms.missing_forms(titles, definition) if titles else []
+    if payload["missing_forms"]:
+        log.info("forms on %s not in the EDC visit: %s", job_id,
+                 ", ".join(f["title"] for f in payload["missing_forms"]))
     return payload
 
 

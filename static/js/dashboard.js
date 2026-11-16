@@ -88,15 +88,19 @@
     }
 
     function render() {
-      WH.clear(statsSlot).appendChild(h("div", { class: "wh-stats wh-stats--cards" },
+      WH.clear(statsSlot).appendChild(h("div", { class: "wh-stats wh-stats--cards wh-dash-stats" },
         TILES.map(([status, label]) => {
           const info = ui.statusInfo(status);
+          const n = counts[status] || 0;
+          // Links can't live inside a <dl>, so the tile uses spans styled
+          // like the dt/dd of the other stat strips.
           return h("a", {
-            class: ["wh-stat", "wh-stat-link", `wh-stat--${info.tone}`],
+            class: ["wh-stat", "wh-stat-link", `wh-stat--${info.tone}`, !n && "is-zero"],
             href: `#/inbox?status=${encodeURIComponent(status)}`,
+            title: `Open ${label.toLowerCase()} in Reviews`,
           },
-            h("dt", null, ui.icon(info.icon, { size: 14 }), label),
-            h("dd", null, WH.fmt.number(counts[status] || 0)));
+            h("span", { class: "wh-stat-label" }, ui.icon(info.icon, { size: 14 }), h("span", { class: "wh-stat-label-text" }, label)),
+            h("span", { class: "wh-stat-value" }, WH.fmt.number(n)));
         })));
 
       const running = batches.filter((b) => !b.done && !b.cancelled);
@@ -133,10 +137,11 @@
       const meta = [doc.screening_no, doc.visit_name, doc.protocol_no].filter(Boolean).join(" · ");
       return h("li", null, h("a", { class: "wh-dash-row", href: docHref(doc) },
         h("span", { class: "wh-dash-row-main" },
-          h("strong", null, doc.filename || "Document"),
+          h("strong", { title: doc.filename || null }, doc.filename || "Document"),
           meta ? h("span", null, meta) : null),
-        ui.chip(doc.status, { size: "sm" }),
-        ui.time(doc.updated_at)));
+        h("span", { class: "wh-dash-row-side" },
+          ui.chip(doc.status, { size: "sm" }),
+          ui.time(doc.updated_at))));
     }
 
     function batchRow(batch) {
@@ -145,10 +150,11 @@
       const status = batch.cancelled ? "cancelled" : !batch.done ? "running" : (c.failed ? "done_failures" : "done");
       return h("li", null, h("a", { class: "wh-dash-row", href: `#/batches/${encodeURIComponent(batch.id)}` },
         h("span", { class: "wh-dash-row-main" },
-          h("strong", null, batch.label || `Batch #${batch.number || batch.id}`),
+          h("strong", { title: batch.label || null }, batch.label || `Batch #${batch.number || batch.id}`),
           h("span", null, `${done} of ${batch.total || 0} finished`)),
-        ui.chip(status, { size: "sm" }),
-        ui.time(batch.created_at)));
+        h("span", { class: "wh-dash-row-side" },
+          ui.chip(status, { size: "sm" }),
+          ui.time(batch.created_at))));
     }
 
     const poller = WH.poll(() => load(true), 15000);

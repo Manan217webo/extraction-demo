@@ -1,0 +1,227 @@
+/* Webo Healthtech eSource — workspace screens: Sources, Audit trail, Admin.
+
+   Loaded after shell.css and only refines it. Everything is scoped to the
+   screen's own wrapper classes (.wh-src-*, .wh-dup*, .wh-audit*, .wh-admin,
+   .wh-role-card) and uses the shell tokens, so both themes follow. */
+
+/* =============================================================== sources */
+
+/* Folder tree: a little narrower on laptop widths so the file table keeps room. */
+@media (min-width: 900px) and (max-width: 1535.98px) {
+  .wh-src-layout {
+    grid-template-columns: 240px minmax(0, 1fr);
+    background: linear-gradient(to right, var(--surface-2) 240px, var(--surface) 240px);
+  }
+}
+@media (min-width: 900px) and (max-width: 1279.98px) {
+  .wh-src-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+    background: linear-gradient(to right, var(--surface-2) 220px, var(--surface) 220px);
+  }
+}
+/* Stacked layout: the side-column tint must not bleed across the files. */
+@media (max-width: 899.98px) {
+  .wh-src-layout { background: var(--surface); }
+  .wh-src-side { background: var(--surface-2); }
+}
+.wh-src-side .wh-tree-row { transition: background var(--t-fast), color var(--t-fast); }
+
+/* The file pane sizes its table by its own width, not the viewport's. */
+.wh-src-main { container: wh-src-main / inline-size; }
+
+.wh-src-toolbar { min-height: 60px; }
+.wh-src-tools .wh-search { max-width: 340px; }
+
+/* Section labels with a quiet count. */
+.wh-src-folders h3, .wh-src-files h3 { display: flex; align-items: center; gap: 8px; }
+.wh-src-count {
+  display: inline-grid; place-items: center; min-width: 20px; height: 18px; padding: 0 6px;
+  border-radius: 999px; background: var(--surface-3); color: var(--text-3);
+  font-size: 11px; font-weight: 700; letter-spacing: 0; font-variant-numeric: tabular-nums;
+}
+
+/* Folder cards: clear hover and selection, one consistent hit area. */
+.wh-src-folder { transition: border-color var(--t-fast), background var(--t-fast), box-shadow var(--t-fast); }
+.wh-src-folder:hover { border-color: var(--accent-line); box-shadow: var(--e1); }
+.wh-src-folder-open { border-radius: 8px; }
+.wh-src-folder-open > span:first-of-type { font-size: 14.5px; }
+
+/* File table. */
+.wh-src-files { padding-bottom: 8px; }
+.wh-src-table td.wh-col-name, .wh-src-table th.wh-col-name { width: 100%; min-width: 200px; }
+.wh-src-table .wh-col-state, .wh-src-table .wh-col-mod, .wh-src-table .wh-col-size { white-space: nowrap; }
+.wh-src-table th:not(:first-child):not(:last-child), .wh-src-table td:not(:first-child):not(:last-child) { padding-left: 10px; padding-right: 10px; }
+.wh-src-table .wh-col-check { width: 36px; }
+.wh-src-table td.wh-col-mod { color: var(--text-3); font-size: 13.5px; }
+.wh-src-table td.wh-col-size { color: var(--text-2); font-size: 13.5px; }
+.wh-src-table .wh-entry-name { display: flex; align-items: flex-start; overflow-wrap: normal; }
+.wh-src-table .wh-entry-name > .wh-icon { margin-top: 1px; }
+.wh-entry-text { display: grid; gap: 1px; min-width: 0; }
+.wh-entry-label { overflow-wrap: break-word; line-height: 1.35; }
+.wh-entry-sub { display: none; font-size: 12px; font-weight: 450; color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wh-src-table .wh-src-actions { gap: 6px; }
+.wh-src-table .wh-src-actions .wh-btn-sm { white-space: nowrap; }
+
+/* Rows can be toggled by clicking them when the person can scan. */
+.wh-src-table:not(.is-readonly) .wh-row:not(.is-covered) { cursor: pointer; }
+.wh-src-table .wh-row.is-checked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.wh-src-table .wh-row.is-checked:focus-visible td:first-child { box-shadow: inset 3px 0 0 var(--accent), inset 0 2px 0 var(--focus-ring), inset 0 -2px 0 var(--focus-ring); }
+.wh-src-table .wh-row.is-covered .wh-entry-name { color: var(--text-2); }
+
+/* Narrow file pane: size and date fold under the name. */
+@container wh-src-main (max-width: 760px) {
+  .wh-src-table .wh-col-size, .wh-src-table .wh-col-mod { display: none; }
+  .wh-entry-sub { display: block; }
+  .wh-src-table td.wh-col-name, .wh-src-table th.wh-col-name { min-width: 160px; }
+  .wh-src-table th, .wh-src-table td { padding-left: 10px; padding-right: 10px; }
+  .wh-src-tools { flex-basis: 220px; }
+}
+@container wh-src-main (max-width: 520px) {
+  .wh-src-table .wh-col-state .wh-chip { max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+}
+
+/* Connected server strip. */
+.wh-src-server-mark { border: 1px solid var(--accent-line); }
+.wh-src-server-counts div { min-width: 84px; }
+.wh-src-server-counts dd { color: var(--text); }
+
+/* Selection bar: keep the summary on one tidy line where possible. */
+.wh-actionbar-detail { flex: 1 1 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wh-actionbar-inner .wh-grow { display: none; }
+@media (max-width: 760px) { .wh-actionbar-detail { white-space: normal; } }
+
+/* ------------------------------------------------- duplicate (already scanned) dialog */
+
+.wh-dup { gap: 16px; }
+.wh-dup-top {
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.wh-dup-summary { font-variant-numeric: tabular-nums; }
+.wh-dup-section h3 { margin-bottom: 2px; }
+.wh-dup-hint { margin-bottom: 10px; }
+.wh-dup-list { display: grid; gap: 8px; }
+.wh-dup-row, .wh-dup-row:last-child {
+  padding: 12px 14px 12px 16px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); position: relative;
+}
+.wh-dup-row::before {
+  content: ""; position: absolute; left: -1px; top: -1px; bottom: -1px; width: 4px;
+  border-radius: 12px 0 0 12px; background: var(--neutral);
+}
+.wh-dup-row--changed::before { background: var(--warn); }
+.wh-dup-row--processed::before { background: var(--success); }
+.wh-dup-row--unreadable::before { background: var(--danger); }
+.wh-dup-row--processing::before { background: var(--info); }
+.wh-dup-row:has([aria-checked="true"]:last-child) { border-color: var(--accent-line); background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface)); }
+.wh-dup-row .wh-seg { flex: none; }
+.wh-dup-warn {
+  padding: 6px 8px; border-radius: 8px; background: var(--warn-bg); border: 1px solid var(--warn-line);
+  line-height: 1.4;
+}
+.wh-dup-path { max-width: 100%; }
+.wh-dup-new { background: var(--info-bg); border-color: var(--info-line); }
+.wh-dup-new summary { list-style: none; }
+.wh-dup-new summary::-webkit-details-marker { display: none; }
+.wh-dup-new summary::after {
+  content: ""; width: 7px; height: 7px; margin-left: auto; border: solid currentColor; border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg); transition: transform var(--t-med) var(--ease-out);
+}
+.wh-dup-new[open] summary::after { transform: rotate(-135deg); }
+.wh-dup-new ul { color: var(--text-2); }
+.wh-dup-reason { box-shadow: inset 3px 0 0 var(--warn); }
+@media (max-width: 720px) {
+  .wh-dup-row { flex-direction: column; align-items: stretch; }
+  .wh-dup-row .wh-seg { align-self: flex-start; }
+}
+
+/* ================================================================= audit */
+
+/* Filters: search and dates on the first line, field filters on the second. */
+.wh-audit .wh-filterbar {
+  display: grid; gap: 8px; align-items: center;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.wh-audit .wh-filterbar > .wh-search { grid-column: span 3; max-width: none; min-width: 0; width: 100%; }
+.wh-audit .wh-filterbar > .wh-daterange { grid-column: span 2; }
+.wh-audit .wh-filterbar > .wh-input { width: 100%; min-width: 0; max-width: none; }
+.wh-audit .wh-filterbar > .wh-clear-filters { justify-self: start; white-space: nowrap; padding: 6px 4px; }
+.wh-daterange { display: flex; gap: 8px; min-width: 0; }
+.wh-daterange .wh-input--date { flex: 1 1 0; width: auto; min-width: 0; }
+.wh-daterange-label { font-size: 12.5px; font-weight: 650; color: var(--text-3); white-space: nowrap; }
+@media (max-width: 1100px) {
+  .wh-audit .wh-filterbar { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .wh-audit .wh-filterbar > .wh-search { grid-column: 1 / -1; }
+  .wh-audit .wh-filterbar > .wh-daterange { grid-column: span 3; }
+}
+@media (max-width: 760px) {
+  .wh-audit .wh-filterbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wh-audit .wh-filterbar > .wh-daterange { grid-column: 1 / -1; }
+}
+
+/* Integrity and delivery cards: matched heights and calmer surfaces. */
+.wh-audit-top { align-items: stretch; }
+.wh-integrity .wh-integrity-body { gap: 12px 16px; }
+.wh-integrity-copy { line-height: 1.45; }
+.wh-delivery .wh-section-title { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+.wh-delivery .wh-stat dd { font-size: 18px; }
+
+/* Timeline: a hairline connects the event markers within a day. */
+.wh-audit-day-list > li { position: relative; }
+.wh-audit-row { position: relative; align-items: start; }
+.wh-audit-row::before {
+  content: ""; position: absolute; left: 132px; top: 0; bottom: 0; width: 1px;
+  background: var(--border); pointer-events: none;
+}
+.wh-audit-day-list > li:first-child > .wh-audit-row::before { top: 24px; }
+.wh-audit-day-list > li:last-child > .wh-audit-row::before { bottom: calc(100% - 24px); }
+.wh-audit-day-list > li:only-child > .wh-audit-row::before { display: none; }
+.wh-audit-dot { position: relative; z-index: 1; }
+.wh-audit-row:focus-visible { outline-offset: -2px; }
+.wh-audit-row.is-flash { transition: background var(--t-slow); }
+.wh-audit-change del { color: var(--danger-ink); text-decoration-thickness: 1px; }
+.wh-audit-change ins { color: var(--success-ink); text-decoration: none; font-weight: 600; }
+.wh-audit-reason { font-style: normal; color: var(--text-3); }
+
+/* Quiet per-row delivery marker (pending / held); failures keep a chip. */
+.wh-audit-deliv {
+  display: inline-flex; align-items: center; gap: 4px; padding-top: 4px;
+  font-size: 11.5px; font-weight: 650; color: var(--text-3); white-space: nowrap;
+}
+.wh-audit-deliv--held .wh-icon { color: var(--warn-ink); }
+.wh-audit-deliv--pending .wh-icon { color: var(--info-ink); }
+.wh-audit-row > .wh-chip { margin-top: 2px; }
+.wh-audit-seq { min-width: 3.5em; text-align: right; }
+
+@media (max-width: 600px) {
+  .wh-audit-row::before { display: none; }
+  .wh-audit-deliv { display: none; }
+}
+
+/* Detail drawer. */
+.wh-audit-detail .wh-subhead { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
+.wh-change-box > div { display: flex; align-items: baseline; gap: 8px; }
+.wh-change-box del { color: var(--danger-ink); }
+.wh-change-box ins { color: var(--success-ink); text-decoration: none; font-weight: 600; }
+
+/* ================================================================= admin */
+
+.wh-users-table .wh-col-role { width: 160px; }
+.wh-users-table .wh-col-role .wh-select { width: 100%; min-width: 130px; }
+.wh-users-table .wh-col-state, .wh-users-table .wh-col-login { white-space: nowrap; }
+.wh-users-table td.wh-col-login { color: var(--text-3); font-size: 13.5px; }
+.wh-users-table .wh-user-cell .wh-muted { font-size: 12.5px; }
+.wh-users-table .wh-row-actions { flex-wrap: nowrap; }
+.wh-admin .wh-filterbar .wh-search { max-width: 360px; }
+.wh-admin .wh-row.is-inactive td.wh-col-user { opacity: 0.7; }
+
+/* Role cards: radio sits with the title, not centred on the description. */
+.wh-role-card { align-items: flex-start; }
+.wh-role-card input { margin-top: 2px; }
+.wh-role-card-body { line-height: 1.4; }
+
+/* Password meter track: visible in both themes. */
+.wh-meter span { background: var(--border-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .wh-src-folder, .wh-dup-new summary::after, .wh-audit-row.is-flash { transition: none; }
+}

@@ -326,3 +326,24 @@ def signature_dict(signature: Optional[db.Signature]) -> Optional[dict[str, Any]
     return {"full_name": signature.full_name, "username": signature.username,
             "meaning": signature.meaning, "signed_at": documents.iso(signature.signed_at),
             "record_sha256": signature.record_sha256}
+
+
+def missing_form_warnings(payload: Optional[dict[str, Any]]) -> list[str]:
+    """One sentence per form printed on the scan that the EDC visit doesn't have
+    (`payload.missing_forms`, set when the scan is read). Those values go nowhere."""
+    form = (payload or {}).get("form") or {}
+    visit = (form.get("edc") or {}).get("visitName") or "this visit"
+    names = []
+    for item in (payload or {}).get("missing_forms") or []:
+        title = str((item or {}).get("title") or "").strip()
+        if not title:
+            continue
+        page = (item or {}).get("page")
+        names.append(f"“{title}”" + (f" (page {page})" if page else ""))
+    if not names:
+        return []
+    if len(names) == 1:
+        return [f"{names[0]} is on the scan but isn't set up in the EDC for {visit}. "
+                "Its values were not read and will not be sent."]
+    return [f"{len(names)} forms on the scan aren't set up in the EDC for {visit}: "
+            f"{', '.join(names)}. Their values were not read and will not be sent."]

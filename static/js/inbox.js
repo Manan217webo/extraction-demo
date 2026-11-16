@@ -20,6 +20,14 @@
     { id: "processing", label: "Processing", icon: "loader" },
     { id: "submitted", label: "Submitted", icon: "check-seal" },
     { id: "failed", label: "Failed", icon: "x-circle" },
+    // Off the work list (e.g. pushed to the wrong site). Not part of "All".
+    { id: "archived", label: "Archived", icon: "archive" },
+  ];
+  const ARCHIVE_PICKS = [
+    "Pushed to the wrong site's folder",
+    "Duplicate copy of another record",
+    "Not a CRF for this study",
+    "Other",
   ];
   const FILTER_KEYS = ["q", "protocol", "subject", "assignee", "flagged"];
 
@@ -39,7 +47,8 @@
      through for unassigned documents. */
   function apiQuery(f, limit, offset) {
     return {
-      status: f.status === "all" ? "" : f.status,
+      status: f.status === "all" || f.status === "archived" ? "" : f.status,
+      archived: f.status === "archived" ? "true" : "",
       q: f.q,
       protocol: f.protocol,
       subject: f.subject,
@@ -48,6 +57,16 @@
       limit,
       offset,
     };
+  }
+
+  /* The folder a file sits in, relative to the scanned source. The file name
+     is already the row's title, so repeating it underneath is noise. */
+  function folderOf(doc) {
+    const path = String(doc.path || "");
+    const name = String(doc.filename || "");
+    if (!path || path === name) return "";
+    if (name && path.endsWith(name)) return path.slice(0, -name.length).replace(/[\\/]+$/, "");
+    return path;
   }
 
   const docHref = (doc) =>
@@ -135,7 +154,8 @@
     }
 
     function tabItems() {
-      const all = TABS.slice(1).reduce((sum, t) => sum + (Number(counts[t.id]) || 0), 0);
+      const all = TABS.slice(1).filter((t) => t.id !== "archived")
+        .reduce((sum, t) => sum + (Number(counts[t.id]) || 0), 0);
       return TABS.map((t) => ({ ...t, count: t.id === "all" ? (Object.keys(counts).length ? all : null) : counts[t.id] != null ? counts[t.id] : null }));
     }
 
@@ -224,7 +244,8 @@
       const ex = doc.extraction || {};
       return [doc.id, doc.status, doc.filename, doc.path, doc.screening_no, doc.visit_name,
         doc.protocol_no, doc.confidence, doc.flags, doc.conflicts, doc.assignee, doc.updated_at,
-        ex.stage || "", ex.error || ""].join("\u001f");
+        ex.stage || "", ex.error || "", doc.archived ? "a" : "",
+        doc.lock && !doc.lock.mine ? doc.lock.username : ""].join("\u001f");
     }
 
     function fillDatalist(dl, set) {
@@ -280,13 +301,13 @@
       const built = h("table", { class: "wh-table wh-inbox-table", "aria-label": "Documents", "aria-rowcount": String(total), dataset: { ids } },
         h("thead", null, h("tr", null,
           h("th", { scope: "col", class: "wh-col-status" }, "Status"),
-          h("th", { scope: "col" }, "Document"),
-          h("th", { scope: "col" }, "Subject"),
-          h("th", { scope: "col" }, "Visit"),
-          h("th", { scope: "col" }, "Protocol"),
+          h("th", { scope: "col", class: "wh-col-doc" }, "Document"),
+          h("th", { scope: "col", class: "wh-col-subject" }, "Subject"),
+          h("th", { scope: "col", class: "wh-col-visit" }, "Visit"),
+          h("th", { scope: "col", class: "wh-col-protocol" }, "Protocol"),
           h("th", { scope: "col", class: "wh-col-conf" }, "Confidence"),
           h("th", { scope: "col", class: "wh-col-flags" }, h("span", { class: "wh-sr" }, "Flags and conflicts"), ui.icon("flag", { size: 14 })),
-          h("th", { scope: "col" }, "Assignee"),
+          h("th", { scope: "col", class: "wh-col-assignee" }, "Assignee"),
           h("th", { scope: "col", class: "wh-col-updated" }, "Updated"),
           h("th", { scope: "col", class: "wh-col-actions" }, h("span", { class: "wh-sr" }, "Actions")))),
         tbody);
@@ -358,8 +379,11 @@
         needs_input: ["Nothing needs your input", "When the header or visit can't be determined, the document waits here for you."],
         processing: ["Nothing is being read right now", "Start a scan from Sources to read new documents."],
         submitted: ["Nothing submitted yet", "Signed submissions to the EDC appear here."],
+        archived: ["Nothing archived", "Records taken off the work list — for example a copy pushed to the wrong site — are kept here."],
         failed: ["No failures", "Every read finished. Nice."],
-        all: ["Nothing has been scanned yet", "Open Sources, pick a folder on the file server, and extract the visit forms inside it."],
+        all: Number(counts.archived) > 0 && !anyFilter()
+          ? ["Nothing on the work list", "Every record here has been archived. Open the Archived tab to see them."]
+          : ["Nothing has been scanned yet", "Open Sources, pick a folder on the file server, and extract the visit forms inside it."],
       }[f.status] || ["Nothing here", ""];
       return ui.emptyState({
         icon: f.status === "failed" ? "check-circle" : "inbox",
@@ -379,16 +403,44 @@
       const stage = doc.status === "processing" && doc.extraction && doc.extraction.stage ? `Reading · ${doc.extraction.stage}` : null;
 
       const actions = h("div", { class: "wh-row-actions" });
-      if (WH.can.write() && !["submitted", "processing"].includes(doc.status)) {
+      const lockedBy = doc.lock && !doc.lock.mine ? doc.lock : null;
+      if (WH.can.write() && doc.archived) {
         actions.appendChild(
           h("button", {
             type: "button",
             class: "btn btn-quiet wh-btn wh-btn-xs",
+            "aria-label": `Restore ${doc.filename || `document ${id}`}`,
+            onClick: (event) => {
+              event.stopPropagation();
+              restore(doc);
+            },
+          }, ui.icon("refresh", { size: 13 }), "Restore")
+        );
+      } else if (WH.can.write() && doc.status !== "processing" && !lockedBy) {
+        actions.appendChild(
+          h("button", {
+            type: "button",
+            class: "wh-icon-btn wh-icon-btn--sm wh-archive-btn",
+            "aria-label": `Archive ${doc.filename || `document ${id}`}`,
+            title: "Archive — take this record off the work list, e.g. a copy pushed to the wrong site",
+            onClick: (event) => {
+              event.stopPropagation();
+              archive(doc);
+            },
+          }, ui.icon("archive", { size: 15 }))
+        );
+      }
+      if (WH.can.write() && !doc.archived && !["submitted", "processing"].includes(doc.status)) {
+        actions.appendChild(
+          h("button", {
+            type: "button",
+            class: ["btn", "btn-quiet", "wh-btn", "wh-btn-xs", "wh-assign-btn", mine && "is-mine"],
+            title: mine ? "Release this document so a colleague can pick it up" : "Assign this document to yourself",
             onClick: (event) => {
               event.stopPropagation();
               mine ? assign(doc, null) : assign(doc, WH.me.username);
             },
-          }, mine ? "Release" : "Assign to me")
+          }, ui.icon(mine ? "x" : "user-plus", { size: 13 }), mine ? "Release" : "Assign to me")
         );
       }
       actions.appendChild(
@@ -402,8 +454,9 @@
         }, ui.icon("history", { size: 15 }))
       );
 
+      const folder = folderOf(doc);
       const row = h("tr", {
-        class: ["wh-row", flags || conflicts ? "has-flags" : null],
+        class: ["wh-row", flags || conflicts ? "has-flags" : null, doc.archived && "is-archived", lockedBy && "is-locked"],
         dataset: { id },
         tabindex: "-1",
         "aria-selected": "false",
@@ -418,11 +471,23 @@
       },
       h("td", { class: "wh-col-status" }, ui.chip(doc.status, { size: "sm", title: doc.extraction && doc.extraction.error ? doc.extraction.error : null })),
       h("td", { class: "wh-col-doc" },
-        h("a", { class: "wh-doc-link", href: docHref(doc), tabindex: "-1" }, doc.filename || `Document ${id}`),
-        h("span", { class: "wh-doc-sub" }, stage || doc.path || "")),
-      h("td", { class: "wh-mono-num" }, doc.screening_no || h("span", { class: "wh-muted" }, "—")),
-      h("td", null, doc.visit_name || h("span", { class: "wh-muted" }, "—")),
-      h("td", { class: "wh-mono-num" }, doc.protocol_no || h("span", { class: "wh-muted" }, "—")),
+        h("a", { class: "wh-doc-link", href: docHref(doc), tabindex: "-1", title: doc.filename || null }, doc.filename || `Document ${id}`),
+        lockedBy && h("span", {
+          class: "wh-inuse",
+          title: `Open for changes by ${lockedBy.full_name || lockedBy.username} since ${WH.fmt.both(lockedBy.since)}`,
+        }, ui.icon("lock", { size: 12 }), `In use by ${lockedBy.full_name || lockedBy.username}`),
+        doc.archived && h("span", {
+          class: "wh-inuse wh-archived",
+          title: doc.archived.reason || "",
+        }, ui.icon("archive", { size: 12 }), `Archived by ${doc.archived.by || "—"}: ${doc.archived.reason || ""}`),
+        stage
+          ? h("span", { class: "wh-doc-sub wh-doc-stage" }, ui.icon("loader", { size: 12, className: "wh-spin" }), stage)
+          : folder && h("span", { class: "wh-doc-sub", title: doc.path }, ui.icon("folder", { size: 12 }), folder),
+        // Shown only when the Protocol column is dropped on narrow screens.
+        doc.protocol_no && h("span", { class: "wh-doc-narrow" }, `Protocol ${doc.protocol_no}`)),
+      h("td", { class: "wh-mono-num wh-col-subject" }, doc.screening_no || h("span", { class: "wh-muted" }, "—")),
+      h("td", { class: "wh-col-visit" }, doc.visit_name || h("span", { class: "wh-muted" }, "—")),
+      h("td", { class: "wh-mono-num wh-col-protocol" }, doc.protocol_no || h("span", { class: "wh-muted" }, "—")),
       h("td", { class: "wh-col-conf" }, ui.confidence(doc.confidence)),
       h("td", { class: "wh-col-flags" },
         flags || conflicts
@@ -502,6 +567,47 @@
       }
     }
 
+    /* ----------------------------------------------- archive / restore */
+
+    async function archive(doc) {
+      const result = await ui.confirm({
+        title: "Archive this record?",
+        message: `${doc.filename} leaves the work list. Nothing is deleted: it stays under ` +
+          "Archived with its history, opens read-only, and can be restored. The file on the " +
+          "file server is not touched — move or delete it there if it was put in the wrong folder.",
+        confirmLabel: "Archive",
+        danger: true,
+        reason: { label: "Why archive it?", picks: ARCHIVE_PICKS },
+      });
+      if (!result) return;
+      try {
+        await WH.api(`/api/docs/${encodeURIComponent(doc.id)}/archive`, { method: "POST", body: { reason: result.reason } });
+        ui.toast({ message: "Archived", detail: doc.filename });
+        load({ reset: true, background: true });
+        loadContinue();
+      } catch (error) {
+        ui.toast({ message: "Couldn't archive it", detail: error.detail, kind: "error" });
+      }
+    }
+
+    async function restore(doc) {
+      const result = await ui.confirm({
+        title: "Restore this record?",
+        message: `${doc.filename} goes back on the work list and can be changed again.`,
+        confirmLabel: "Restore",
+        reason: { label: "Why restore it?", picks: ["Archived by mistake", "Belongs to this site after all", "Other"] },
+      });
+      if (!result) return;
+      try {
+        await WH.api(`/api/docs/${encodeURIComponent(doc.id)}/restore`, { method: "POST", body: { reason: result.reason } });
+        ui.toast({ message: "Restored", detail: doc.filename });
+        load({ reset: true, background: true });
+        loadContinue();
+      } catch (error) {
+        ui.toast({ message: "Couldn't restore it", detail: error.detail, kind: "error" });
+      }
+    }
+
     function replaceRow(doc) {
       const id = String(doc.id);
       const old = rowsById.get(id);
@@ -578,7 +684,7 @@
       } else if (event.key === "Enter" && row && !event.target.closest("a, button")) {
         event.preventDefault();
         location.hash = docHref(row.doc);
-      } else if (key === "a" && row && WH.can.write() && !["submitted", "processing"].includes(row.doc.status)) {
+      } else if (key === "a" && row && WH.can.write() && !row.doc.archived && !["submitted", "processing"].includes(row.doc.status)) {
         event.preventDefault();
         const mine = row.doc.assignee === WH.me.username;
         assign(row.doc, mine ? null : WH.me.username);

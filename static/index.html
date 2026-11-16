@@ -14,6 +14,8 @@
     <link rel="stylesheet" href="/static/styles.css" />
     <link rel="stylesheet" href="/static/css/shell.css" />
     <link rel="stylesheet" href="/static/css/review.css" />
+    <link rel="stylesheet" href="/static/css/ui-worklist.css" />
+    <link rel="stylesheet" href="/static/css/ui-workspace.css" />
     <script>
       /* Theme and density before first paint, so a dark-mode reader never sees a
          white flash. Storage can throw (private mode); fall back to the system. */
@@ -127,12 +129,18 @@
           </div>
           <p id="login-error" class="login-error hidden" role="alert"></p>
           <button type="submit" class="btn btn-primary btn-lg" id="login-submit"><span class="wh-btn-label">Sign in</span></button>
+          <p class="login-note">For authorised study staff. Sign-ins and every change are recorded in the audit trail.</p>
         </form>
       </div>
       <aside class="login-aside">
         <p class="login-kicker">eSource</p>
         <h2>Check the page. Then sign what changed.</h2>
-        <p>Each value is read twice. You confirm it against the scan before anything is written to the EDC.</p>
+        <p class="login-aside-lede">Each value is read twice. You confirm it against the scan before anything is written to the EDC.</p>
+        <ul class="login-points">
+          <li>Every value boxed on the original page</li>
+          <li>A reason recorded for every change</li>
+          <li>Electronic signature before submission (21 CFR Part 11)</li>
+        </ul>
       </aside>
     </div>
 
@@ -157,9 +165,6 @@
 
         <!-- Review screen (owned by app.js): upload landing, processing and viewer. -->
         <div id="review-root" class="wh-review-root" hidden>
-        <div id="tab-banner" class="tab-banner hidden" role="status">
-          This review is open in another tab. Editing is paused here so the two tabs do not overwrite each other.
-        </div>
 
         <main class="workspace" id="workspace">
           <section class="intro">
@@ -361,6 +366,9 @@
               </div>
             </div>
           </header>
+          <div id="tab-banner" class="tab-banner hidden" role="status">
+            This review is open in another tab. Editing is paused here so the two tabs do not overwrite each other.
+          </div>
 
           <div class="viewer-stage" id="viewer-stage" data-layout="split">
             <section class="pane pane-original" id="pane-original">

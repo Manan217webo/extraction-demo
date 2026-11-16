@@ -874,3 +874,25 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         "_delta": {"changes": changes, "skipped": skipped},
     }
     return payload, warnings
+
+
+# A printed title at least this close to an EDC CRF's name (or to the CRF the
+# definition matched) is that CRF. Below it the form is reported as missing.
+FORM_TITLE_MATCH = 0.6
+
+
+def missing_forms(titles: Optional[list[dict[str, Any]]],
+                  definition: dict[str, Any]) -> list[dict[str, Any]]:
+    """The forms printed on the scan that this EDC visit has no CRF for."""
+    names = [_norm(crf.get("crfName") or "") for crf in definition.get("edc", {}).get("crfs") or []]
+    names += [_norm(section.get("name") or "") for section in definition.get("sections") or []]
+    names = [name for name in names if name]
+    out = []
+    for item in titles or []:
+        title = _norm(item.get("title") or "")
+        if not title:
+            continue
+        if names and max(_similar(title, name) for name in names) >= FORM_TITLE_MATCH:
+            continue
+        out.append({"title": item.get("title"), "page": item.get("page")})
+    return out
