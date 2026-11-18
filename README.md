@@ -71,12 +71,20 @@ uv sync                     # creates .venv from uv.lock
 cp .env.example .env        # Windows: copy .env.example .env
 docker compose up -d redis  # login sessions and job meta
 cp sources.example.json sources.json   # scans ~/Desktop/eSource; created if missing
-uv run scripts/add_user.py alice --full-name "Alice Ng" --role admin
 ```
 
-Fill in `LLAMA_CLOUD_API_KEY` and `OPENAI_API_KEY`, and point `EDC_BASE_URL` at
-the EDC deployment this instance should talk to. See `.env.example` for the
-full list of settings and what each one does.
+Fill in `LLAMA_CLOUD_API_KEY` and `OPENAI_API_KEY`. Everything else in `.env`
+already works against the Cronos dev EDC: sign in with your **Cronos username and
+password** (`AUTH_MODE=cronos`). No eSource accounts need to be created. Point
+`EDC_BASE_URL` at another EDC only if this instance should talk to a different
+one. See `.env.example` for the full list of settings and what each one does.
+
+If every sign-in says "Incorrect username or password" although the password
+works in Cronos, `.env` has `AUTH_MODE=local` (or no `AUTH_MODE` line). Set
+`AUTH_MODE=cronos` and restart. `uv run scripts/doctor.py` checks this.
+
+Only for `AUTH_MODE=local` (no Cronos): create accounts with
+`uv run scripts/add_user.py alice --full-name "Alice Ng" --role admin`.
 
 ## Check the machine is ready
 

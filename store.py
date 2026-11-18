@@ -15,6 +15,10 @@ from typing import Any, AsyncIterator, Optional
 
 from redis.asyncio import Redis
 from redis.asyncio.lock import Lock
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 log = logging.getLogger("extraction.store")
 
@@ -33,8 +37,27 @@ def job_ttl_seconds() -> int:
 def get_redis() -> Redis:
     global _client
     if _client is None:
-        _client = Redis.from_url(redis_url(), decode_responses=True)
+        # A pooled connection the server or network dropped while idle is
+        # checked before reuse and replaced, and a failed call is retried on a
+        # fresh connection, so one dead socket doesn't fail a request.
+        _client = Redis.from_url(
+            redis_url(), decode_responses=True,
+            health_check_interval=15, socket_keepalive=True,
+            retry=Retry(ExponentialBackoff(cap=0.5, base=0.05), 2),
+            retry_on_error=[RedisConnectionError, RedisTimeoutError],
+        )
     return _client
+
+
+async def reset() -> None:
+    """Drop the client and its pool; the next get_redis() connects afresh."""
+    global _client
+    client, _client = _client, None
+    if client is not None:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            log.debug("closing a broken redis client: %s", exc)
 
 
 async def close() -> None:

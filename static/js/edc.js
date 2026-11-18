@@ -885,7 +885,7 @@
     const form = state.payload && state.payload.form;
     if (!form) return out;
     const visit = (field) => {
-      if (!field || !field.key || field.row_name) return;
+      if (!field || !field.key || field.row_name || field.type === "label") return;
       if ((field.issues || []).length) out.flags.add(field.key);
       const r = field.reading || {};
       if (r.reads > 1 && !r.agreed && !r.one_read

@@ -154,6 +154,17 @@ def check_edc_host() -> None:
         record(PASS, "EDC_BASE_URL", url)
 
 
+def check_sign_in() -> None:
+    import cronos_auth
+    if cronos_auth.enabled():
+        record(PASS, "Sign-in", f"Cronos username and password ({cronos_auth.base_url()})")
+    else:
+        record(WARN, "Sign-in",
+               "AUTH_MODE is local: only eSource's own accounts can sign in, so every "
+               "Cronos username gets 'Incorrect username or password'. Set "
+               "AUTH_MODE=cronos in .env to sign in with Cronos.")
+
+
 async def check_database() -> None:
     import audit
     import db
@@ -176,7 +187,10 @@ async def check_database() -> None:
         record(FAIL, "Database", f"{shown} — {exc}")
         return
     record(PASS, "Database", shown)
-    if users:
+    import cronos_auth
+    if cronos_auth.enabled():
+        record(PASS, "Accounts", f"from Cronos at sign-in ({users} so far)")
+    elif users:
         record(PASS if admins else WARN, "Accounts",
                f"{users} account(s), {admins} active admin(s)")
     else:
@@ -279,6 +293,7 @@ async def main() -> int:
     check_box_placement()
     check_local_definitions()
     check_edc_host()
+    check_sign_in()
     check_fixture_mode()
     await check_redis()
     await check_database()

@@ -312,6 +312,23 @@ def test_reviewer_clearing_a_value_is_sent_but_an_unread_blank_is_not():
     assert {f["field_id"]: f["value"] for f in body["crfs"][0]["fields"]} == {101: ""}
 
 
+def test_label_controls_are_read_only_and_never_sent():
+    import visit_forms
+    crf = {"crfId": 9, "crfName": "Vitals", "fields": [
+        {"field_id": 201, "field_name": "Note", "control_type": "label", "field_col": 1,
+         "field_row": 1, "value": "Measure seated"},
+        {"field_id": 202, "field_name": "SBP", "control_type": "number", "field_col": 1,
+         "field_row": 2, "value": ""}]}
+    built = visit_forms.build_structured_crf(crf)
+    types = {f["label"]: f["type"] for f in built["section"]["fields"]}
+    assert types == {"Note": "label", "SBP": "number"}
+    form = {"sections": [{"section_id": "vitals", "fields": [
+        {"field_id": "wt", "label": "Weight", "type": "label", "value": "72",
+         "status": "edited", "key": "vitals.wt"}]}]}
+    body, _ = visit_forms.build_save(_definition(), form, {})
+    assert not body["crfs"]
+
+
 def test_crf_without_field_ids_is_sent_in_full():
     import visit_forms
     definition = _definition()
@@ -390,3 +407,27 @@ def test_edc_pull_pages_through_the_trail_in_order(isolated, monkeypatch):
         async with db.session() as s:
             return {o.status for o in (await s.execute(select(db.AuditOutbox))).scalars()}
     assert run(outbox()) == {"held"}
+
+
+def test_a_broken_session_store_is_not_reported_as_signed_out(isolated, monkeypatch):
+    """A dead Redis connection right after sign-in used to answer 401, and the
+    browser showed the sign-in screen to someone who had just signed in."""
+    import auth
+    import store
+    calls = {"lookups": 0, "resets": 0}
+
+    async def broken(*args, **kwargs):
+        calls["lookups"] += 1
+        raise RuntimeError("unable to perform operation on <TCPTransport closed=True>; "
+                           "the handler is closed")
+
+    async def reset():
+        calls["resets"] += 1
+
+    monkeypatch.setattr(auth, "session_info", broken)
+    monkeypatch.setattr(store, "reset", reset)
+    client = _pull_client()
+    client.cookies.set(auth.COOKIE_NAME, "some-session")
+    response = client.get("/api/meta")
+    assert response.status_code == 503
+    assert calls == {"lookups": 2, "resets": 2}

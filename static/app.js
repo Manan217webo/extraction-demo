@@ -1877,6 +1877,15 @@ function inlineNotice(container, text, kind = "warn", action = null) {
 function fieldControl(field) {
   const value = field.value === null || field.value === undefined ? "" : String(field.value);
 
+  // A label control is printed text on the eCRF, not a place to enter data:
+  // shown as text, never editable, and its value never changes.
+  if (field.type === "label") {
+    const text = document.createElement("span");
+    text.className = "field-label-text";
+    text.textContent = value || "—";
+    return { node: text, read: () => field.value ?? null };
+  }
+
   if (field.type === "radio" && (field.options || []).length > 0
       && (field.options || []).length <= 4) {
     const row = document.createElement("div");
@@ -1978,6 +1987,14 @@ function renderField(field, { compact = false } = {}) {
   wrap.className = "field-input";
   const control = fieldControl(field);
   wrap.appendChild(control.node);
+  if (field.type === "label") {
+    // Printed text in the EDC: no reading score, flags or edit wiring.
+    row.classList.remove("is-flagged", "is-empty");
+    row.classList.add("is-label");
+    if (compact) row.append(wrap);
+    else row.append(label, wrap);
+    return row;
+  }
 
   const meta = document.createElement("div");
   meta.className = "field-meta";

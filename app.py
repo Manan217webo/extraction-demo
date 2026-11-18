@@ -221,9 +221,16 @@ async def lifespan(_app: FastAPI):
     if db.is_sqlite() and int(os.getenv("WEB_CONCURRENCY") or 1) > 1:
         log.warning("SQLite is for one process only; set DATABASE_URL to PostgreSQL "
                     "before running several workers")
+    if cronos_auth.enabled():
+        log.info("Sign-in: Cronos (%s)", cronos_auth.base_url())
+    else:
+        log.warning("Sign-in: AUTH_MODE=local — only eSource's own accounts can sign in; "
+                    "Cronos usernames will get 'Incorrect username or password'. "
+                    "Set AUTH_MODE=cronos in .env to sign in with Cronos.")
     async with db.session() as session:
         from sqlalchemy import select as _select
-        if (await session.execute(_select(db.User).limit(1))).scalar() is None:
+        if not cronos_auth.enabled() and \
+                (await session.execute(_select(db.User).limit(1))).scalar() is None:
             log.warning("No accounts yet — create one with: uv run scripts/add_user.py "
                         "<username> --role admin")
     pipeline.start()
@@ -517,11 +524,25 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             # Background polling (GET) must not keep an idle session alive; a
             # write or an explicit ping is the reviewer actually working.
             touch = request.method != "GET"
-            try:
-                info = await auth.session_info(store.get_redis(), token, touch=touch)
-            except Exception as exc:
-                log.warning("session lookup failed: %s", exc)
-                info = None
+            info, lookup_failed = None, False
+            for attempt in (1, 2):
+                try:
+                    info = await auth.session_info(store.get_redis(), token, touch=touch)
+                    lookup_failed = False
+                    break
+                except Exception as exc:
+                    # A dead pooled connection ("handler is closed") is not a
+                    # signed-out person: reconnect and ask once more.
+                    lookup_failed = True
+                    log.warning("session lookup failed (attempt %s): %s", attempt, exc)
+                    await store.reset()
+            if lookup_failed:
+                # Never answer 401 for our own fault: the browser would show the
+                # sign-in screen to someone who just signed in.
+                return JSONResponse(
+                    {"detail": "We couldn't check your session just now. Please try again."},
+                    status_code=503,
+                )
             user = await auth.get_user(info["u"]) if info else None
             if not info or user is None or not user.active:
                 return JSONResponse(

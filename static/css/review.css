@@ -793,3 +793,10 @@ body.read-only #region-toggle { pointer-events: auto; opacity: 1; }
   line-height: 1.5;
 }
 .status-list.is-lines li::marker { color: var(--text-3); }
+
+/* An EDC label control: printed text on the eCRF, not an entry field. */
+.field.is-label .field-label-text {
+  display: block;
+  padding: 6px 0;
+  color: var(--muted, #6b7280);
+}

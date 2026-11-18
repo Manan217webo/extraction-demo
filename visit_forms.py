@@ -371,7 +371,9 @@ def _structured_group(container: dict[str, Any], cells: list[dict[str, Any]],
         built = _structured_field(sample, field_id)
         built["label"] = heading or built["label"]
         if label_column:
-            built["type"] = "text"
+            # A label control is printed text in the EDC, not an entry field:
+            # shown read-only and never sent.
+            built["type"] = "label"
             # It names the row rather than holding data a reviewer entered, so it
             # is not boxed on the page in its own right — the row's values carry
             # it into their own boxes instead.
@@ -726,6 +728,8 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
         labels: dict[int, Optional[str]] = {}
 
         def place(field: dict[str, Any], key: str, addr: str, row: Optional[int]) -> None:
+            if field.get("type") == "label":
+                return  # printed text in the EDC, not data entry
             index = address.get(addr)
             if index is None:
                 # The row-label column is ours, not the EDC's; it has nowhere to go.
