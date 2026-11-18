@@ -221,6 +221,10 @@ async def lifespan(_app: FastAPI):
     if db.is_sqlite() and int(os.getenv("WEB_CONCURRENCY") or 1) > 1:
         log.warning("SQLite is for one process only; set DATABASE_URL to PostgreSQL "
                     "before running several workers")
+    if not fields.configured():
+        log.warning("OPENAI_API_KEY is missing or still the placeholder in .env — the header "
+                    "and CRF fields will NOT be read; reviewers get blank values and "
+                    "'Field extraction isn't configured'. Put the real key in .env and restart.")
     if cronos_auth.enabled():
         log.info("Sign-in: Cronos (%s)", cronos_auth.base_url())
     else:
@@ -1052,6 +1056,9 @@ def _header_response(job_id: str, meta: dict[str, Any], header: dict[str, Any],
         "truncated": fields.was_truncated(document),
         "header_pages_read": len(pages),
         "usage": usage,
+        # Set when the AI read failed and the values come from the plain-text
+        # fallback (often blank on a scan): the screen says why.
+        "ai_unavailable": meta.get("header_ai_error"),
     }
 
 
@@ -1062,7 +1069,9 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
     async with store.lock(f"header:{job_id}"):
         meta = await _owned_job(job_id, username)
         parse = await store.get_parse(job_id)
-        if "header_rows" in meta and parse:
+        # A read that fell back because the AI was unavailable (no key, outage)
+        # is not reused: once the key is fixed the header is read properly.
+        if "header_rows" in meta and parse and not meta.get("header_ai_error"):
             pages = (parse.get("pages") or [])[:HEADER_PAGE_LIMIT]
             document = fields.document_for_model(pages, "")
             header = mapping.build_header(
@@ -1081,6 +1090,7 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
                      job_id, len(pages), len(document))
 
             read_started = time.monotonic()
+            ai_error = None
             try:
                 images = (await _job_images(job_id, HEADER_PAGE_LIMIT)
                           if _is_vision_job(meta) else None)
@@ -1090,6 +1100,7 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
                 # The reviewer confirms these three identifiers by hand, so a
                 # reading from the parsed text is still worth showing them.
                 log.warning("header read fell back to the parsed text: %s", exc)
+                ai_error = str(exc)
                 result = local_fields.extract_header(document)
             log.info("header read for %s in %.1fs", job_id, time.monotonic() - read_started)
 
@@ -1103,6 +1114,10 @@ async def _read_header(job_id: str, username: str) -> dict[str, Any]:
         )
         meta["header_rows"] = result["values"]
         meta["header_usage"] = result.get("usage", {})
+        if ai_error:
+            meta["header_ai_error"] = ai_error
+        else:
+            meta.pop("header_ai_error", None)
         await store.put_job(job_id, meta)
         log.info("header stage for %s took %.1fs", job_id, time.monotonic() - started)
 

@@ -263,6 +263,9 @@ async def _run(extraction_id: str, token: str) -> None:
               "visit_name": cronos.format_visit_name(str(confirmed.get("visit_name") or ""))}
     base_snapshot = {"header": header_response, "visit": None, "payload": None,
                      "meta": working_meta(await store.get_job(job_id) or meta)}
+    if not all(triple.values()) and header_response.get("ai_unavailable"):
+        raise NeedsInput("The AI couldn't read this page: "
+                         f"{header_response['ai_unavailable']}", base_snapshot, triple)
     if not all(triple.values()):
         missing = [k.replace("_", " ") for k, v in triple.items() if not v]
         raise NeedsInput(f"The header doesn't show the {', '.join(missing)}. Open it to fill "

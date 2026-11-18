@@ -1491,7 +1491,13 @@ async function restoreSession(jobId) {
   wireTabLease(saved.jobId);
 
   enableStep("header");
-  if (state.header) {
+  if (state.header && state.header.ai_unavailable && !state.payload && !state.submitted
+      && !state.readOnly) {
+    // Saved while the AI was off (e.g. no OpenAI key). Read it again now: if
+    // the key has since been added, the header fills itself in.
+    state.header = null;
+    loadHeader();
+  } else if (state.header) {
     renderHeader(state.header);
     enableStep("form");
   }
@@ -2504,6 +2510,24 @@ function renderHeader(data) {
   els.headerConfirm.disabled = false;
   els.headerGroups.innerHTML = "";
 
+  // The AI never read this page (no key, or the service failed): say so,
+  // rather than leaving blank fields that look like a bad scan.
+  if (data.ai_unavailable) {
+    const missingKey = /isn't configured/i.test(data.ai_unavailable);
+    els.headerGroups.appendChild(statusNode({
+      kind: "warn",
+      title: missingKey
+        ? "AI reading is off: the OpenAI key is missing"
+        : "The AI couldn't read this page",
+      detail: missingKey
+        ? "Nothing on this document was read automatically. Ask your administrator to add " +
+          "the OpenAI key to the .env file and restart eSource, then open this document again. " +
+          "You can also type the three values below by hand."
+        : `${data.ai_unavailable} Open this document again in a moment, or type the three ` +
+          "values below by hand.",
+    }));
+  }
+
   if (data.truncated) {
     inlineNotice(
       els.headerGroups,
@@ -2511,7 +2535,7 @@ function renderHeader(data) {
         "extraction. Values from later pages will be missing."
     );
   }
-  if (!data.anchoring) {
+  if (!data.anchoring && !data.ai_unavailable) {
     inlineNotice(
       els.headerGroups,
       "This document was read in a mode that doesn't record page positions, so values " +
@@ -3919,7 +3943,13 @@ function applyReviewSnapshot(id, snap, bytes) {
   setReadOnly();
 
   enableStep("header");
-  if (state.header) {
+  if (state.header && state.header.ai_unavailable && !state.payload && !state.submitted
+      && !state.readOnly) {
+    // Saved while the AI was off (e.g. no OpenAI key). Read it again now: if
+    // the key has since been added, the header fills itself in.
+    state.header = null;
+    loadHeader();
+  } else if (state.header) {
     renderHeader(state.header);
     enableStep("form");
   }
