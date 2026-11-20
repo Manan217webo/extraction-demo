@@ -1976,17 +1976,26 @@ mark.current { background: var(--purple); color: #fff; }
   gap: 10px;
   padding: 10px 14px 10px 12px;
   border-radius: 12px;
-  background: var(--ink);
-  color: #fff;
+  /* The theme's inverse pair: dark on a light page, light on a dark one.
+     --ink turns light in dark mode, which left white text on a pale toast. */
+  background: var(--inverse-bg, #1c1728);
+  color: var(--inverse-text, #f5f3fb);
+  max-width: min(560px, calc(100vw - 32px));
+  line-height: 1.4;
   font-size: 13px;
   font-weight: 600;
   box-shadow: var(--shadow);
   animation: toast-in var(--dur-slow) var(--ease) both;
   pointer-events: auto;
 }
+.toast > span:not(.toast-icon) { overflow-wrap: anywhere; }
 .toast.is-leaving { animation: fade-out var(--dur) var(--ease) both; }
 .toast-icon { width: 18px; height: 18px; display: grid; place-items: center; color: var(--green); }
 .toast--error .toast-icon { color: #ff8a9d; }
+.toast-icon { flex: none; }
+html[data-theme="dark"] .toast-icon { color: #17734f; }
+html[data-theme="dark"] .toast--error .toast-icon { color: #b3223f; }
+html[data-theme="dark"] .toast--info .toast-icon { color: #5a3ad6; }
 
 /* ------------------------------------------------------------ surface polish */
 .card, .crf-section { transition: box-shadow var(--dur) var(--ease), border-color var(--dur) var(--ease); }

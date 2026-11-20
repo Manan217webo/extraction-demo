@@ -431,3 +431,24 @@ def test_a_broken_session_store_is_not_reported_as_signed_out(isolated, monkeypa
     response = client.get("/api/meta")
     assert response.status_code == 503
     assert calls == {"lookups": 2, "resets": 2}
+
+
+def test_crf_pdf_and_json_exports_build(isolated):
+    """Download PDF failed on every record: the endpoint passed an argument the
+    builder does not take."""
+    import app
+    payload = {
+        "header": {"groups": [{"name": "Visit identity", "fields": [
+            {"key": "header.protocol_no", "field_id": "protocol_no", "label": "Protocol No.",
+             "type": "text", "value": "ICR/24/001", "status": "extracted", "issues": []}]}]},
+        "form": {"form_id": "F", "form_name": "Visit 5", "sections": [{
+            "section_id": "vitals", "name": "Vital Signs", "fields": [
+                {"key": "vitals.pulse", "field_id": "pulse", "label": "Pulse", "type": "number",
+                 "value": "72", "status": "extracted", "issues": [], "confidence": 0.98}],
+            "groups": []}]},
+    }
+    body = app.CrfExport(payload=payload, filename="scan.pdf")
+    pdf = run(app.export_crf_pdf(body))
+    assert pdf.media_type == "application/pdf" and pdf.body.startswith(b"%PDF")
+    js = run(app.export_crf_json(body))
+    assert js.media_type == "application/json" and b"Pulse" in js.body

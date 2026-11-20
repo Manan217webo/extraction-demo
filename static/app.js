@@ -3150,8 +3150,10 @@ async function exportCrf(kind) {
     const blob = await response.blob();
     saveBlob(blob, filenameFrom(response, kind));
   } catch (error) {
+    // The buttons sit at the bottom of a long form: a notice at the top alone
+    // went unseen, so the failure is also said where the person is looking.
+    toast(error.message, "error", 6000);
     inlineNotice(els.formSections, error.message);
-    els.extractedScroll.scrollTop = 0;
   } finally {
     button.disabled = false;
     button.textContent = original;

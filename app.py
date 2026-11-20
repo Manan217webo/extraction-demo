@@ -1525,7 +1525,7 @@ async def export_crf_pdf(request: CrfExport) -> Response:
     payload = mapping.revalidate(request.payload)
     stem = _export_stem(request.filename, payload)
     try:
-        data = build_crf_pdf(payload, stem)
+        data = build_crf_pdf(payload)
     except Exception as exc:
         log.exception("crf pdf export failed", exc_info=exc)
         raise HTTPException(status_code=500, detail="We couldn't build the PDF.") from exc
