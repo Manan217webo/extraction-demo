@@ -114,6 +114,8 @@
     submitted: { label: "Submitted", icon: "check-seal", tone: "success" },
     failed: { label: "Failed", icon: "x-circle", tone: "danger" },
     needs_input: { label: "Needs input", icon: "alert-circle", tone: "warn" },
+    split_review: { label: "Choose visits", icon: "layers", tone: "warn" },
+    split: { label: "Split into visits", icon: "layers", tone: "info" },
     archived: { label: "Archived", icon: "archive", tone: "neutral" },
     // source files
     new: { label: "Not scanned", icon: "plus", tone: "info" },

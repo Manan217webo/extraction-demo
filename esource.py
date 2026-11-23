@@ -81,6 +81,55 @@ async def register_upload(username: str, filename: str, contents: bytes, pages: 
         return {"document_id": ingested.document.id, "extraction_id": extraction.id}
 
 
+async def abandon_upload(extraction_id: str, error: str) -> None:
+    """An upload that couldn't be opened or scanned: close its run, keep its record."""
+    async with db.session() as session:
+        extraction = await session.get(db.Extraction, extraction_id)
+        if extraction is None:
+            return
+        document = await session.get(db.Document, extraction.document_id)
+        extraction.status, extraction.error = "failed", error
+        extraction.finished_at = db.utcnow()
+        if document is not None:
+            previous = await documents.latest_extraction(session, document.id,
+                                                         documents.DONE_STATUSES)
+            document.status = "ready" if previous else "failed"
+        await audit.record(session, "extraction.failed", username=extraction.created_by,
+                           document=document, new_value="failed",
+                           details={"extraction_id": extraction.id, "error": error})
+        await session.commit()
+
+
+async def park_upload(document_id: str, extraction_id: str, split: db.Split) -> str:
+    """An upload holding several visits waits for its split to be confirmed."""
+    import splits
+
+    async with db.session() as session:
+        document = await session.get(db.Document, document_id)
+        extraction = await session.get(db.Extraction, extraction_id)
+        message = await splits.park_for_review(session, document, split)
+        extraction.status, extraction.stage, extraction.error = "needs_input", "split", message
+        extraction.finished_at = db.utcnow()
+        await audit.record(session, "extraction.completed", username=extraction.created_by,
+                           document=document, new_value="needs_input",
+                           details={"extraction_id": extraction.id, "error": message})
+        await session.commit()
+        return message
+
+
+async def mark_single(document_id: str, pages: Optional[list[int]],
+                      segment: dict[str, Any]) -> None:
+    """An upload that is one visit: remember which pages and how the visit is named."""
+    async with db.session() as session:
+        document = await session.get(db.Document, document_id)
+        if document is None:
+            return
+        document.pages = pages
+        document.visit_label = segment.get("label")
+        document.fingerprint = segment.get("fingerprint")
+        await session.commit()
+
+
 async def remember_stage(job_id: str, kind: str, value: dict[str, Any], username: str,
                          meta: Optional[dict[str, Any]]) -> None:
     """Keep what an interactive step produced with its extraction run.
@@ -227,8 +276,9 @@ async def restore_job(job_id: str) -> Optional[dict[str, Any]]:
             return None
         snapshot = extraction.snapshot or {}
         owner = extraction.created_by
+        only = list(document.pages) if document.pages else None
     data = await blobstore.get(version.sha256)
-    images = await render.page_images(data, 200)
+    images = await render.page_images(data, 200, only=only)
     meta = {"job_id": job_id, "filename": document.filename, "mode": "vision",
             "parser": "vision", "pages": len(images), "owner": owner,
             "document_id": document.id, "extraction_id": extraction.id,

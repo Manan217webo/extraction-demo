@@ -120,6 +120,8 @@
     if (!response.ok) {
       let detail = data && data.detail;
       if (Array.isArray(detail)) detail = detail.map((d) => d.msg || "").filter(Boolean).join(" ");
+      // Some refusals carry more than words ({message, lock} or {message, split}).
+      else if (detail && typeof detail === "object") detail = detail.message || null;
       const error = new Error(detail || defaultMessage(response.status));
       error.status = response.status;
       error.detail = detail || error.message;

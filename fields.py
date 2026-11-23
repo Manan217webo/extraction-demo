@@ -298,8 +298,11 @@ _PAGE_IMAGE = re.compile(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$
 MAX_PAGE_IMAGES = int(os.getenv("MAX_PAGE_IMAGES") or 12)
 
 
-def page_images(pages: Optional[dict[str, str]]) -> list[tuple[int, str]]:
-    """The page images worth sending, in page order."""
+def page_images(pages: Optional[dict[str, str]], cap: bool = True) -> list[tuple[int, str]]:
+    """The page images worth sending, in page order.
+
+    `cap=False` returns every page: the form read routes pages to CRFs and reads
+    in chunks itself, so a long visit loses no pages."""
     out: list[tuple[int, str]] = []
     for number, url in (pages or {}).items():
         try:
@@ -309,18 +312,20 @@ def page_images(pages: Optional[dict[str, str]]) -> list[tuple[int, str]]:
         if page > 0 and isinstance(url, str) and _PAGE_IMAGE.match(url):
             out.append((page, url))
     out.sort()
+    if not cap:
+        return out
     if len(out) > MAX_PAGE_IMAGES:
         log.warning("sending %s of %s page images", MAX_PAGE_IMAGES, len(out))
     return out[:MAX_PAGE_IMAGES]
 
 
-def _with_images(text: str, images: list[tuple[int, str]]) -> Any:
+def _with_images(text: str, images: list[tuple[int, str]], detail: str = "high") -> Any:
     if not images:
         return text
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}]
     for page, url in images:
         parts.append({"type": "text", "text": f"Page {page}:"})
-        parts.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+        parts.append({"type": "image_url", "image_url": {"url": url, "detail": detail}})
     return parts
 
 
@@ -747,6 +752,141 @@ async def extract_header(document: str,
             "usage": _merge_usage(usages)}
 
 
+# --------------------------------------------------------------------------- page headers
+
+STRIP_BOX = {
+    "type": "object",
+    "properties": {"found": {"type": "boolean"}, "x0": {"type": "integer"},
+                   "y0": {"type": "integer"}, "x1": {"type": "integer"},
+                   "y1": {"type": "integer"}},
+    "required": ["found", "x0", "y0", "x1", "y1"],
+    "additionalProperties": False,
+}
+
+PAGE_HEADERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pages": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "page": {"type": "integer", "description": "The page number given above the image."},
+                    "has_header": {"type": "boolean"},
+                    "protocol_no": {"type": ["string", "null"]},
+                    "screening_no": {"type": ["string", "null"]},
+                    "visit": {"type": ["string", "null"]},
+                    "visit_date": {"type": ["string", "null"]},
+                    "confidence": {"type": "number"},
+                    "protocol_box": STRIP_BOX,
+                    "screening_box": STRIP_BOX,
+                    "visit_box": STRIP_BOX,
+                },
+                "required": ["page", "has_header", "protocol_no", "screening_no", "visit",
+                             "visit_date", "confidence", "protocol_box", "screening_box",
+                             "visit_box"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["pages"],
+    "additionalProperties": False,
+}
+
+PAGE_HEADERS_RULES = """Each image is the top strip of one page of a clinical trial source
+document (a case report form). Most pages print the same header block: protocol number,
+screening (subject) number, patient initials, the visit and a visit date.
+
+For every image, return one entry with the page number written above it:
+- has_header: true when the strip shows that header block; false for a cover page,
+  instructions, a table continuing from the page before, or an empty strip.
+- protocol_no: exactly as printed, slashes and dashes included. Null if not shown.
+- screening_no: the digits written in the screening number boxes, digits only. Null when
+  the boxes are empty or you cannot read every digit.
+- visit: the visit text exactly as printed in the header, starting with the word Visit
+  and its number when there is one, followed by any title on the same line — for example
+  "Visit 3 Treatment Visit: Day 29±3 (Week 4)" or "Unscheduled Visit". If the header says
+  the page applies to all visits (e.g. "All Applicable"), return that text. Null if the
+  strip shows no visit.
+- visit_date: the visit date as written, or null.
+- confidence: 0 to 1, how sure you are of the handwritten screening number and visit.
+- *_box: where that value sits in this strip, corners on a 0..1000 grid (0,0 top-left).
+  found false with zeros when it is not there.
+Read every image on its own. Never copy a value from another image: if a page's value is
+unreadable, return null for it even when the other pages show it."""
+
+
+def split_model() -> str:
+    """The model that reads header strips: the smaller of the two read models,
+    unless OPENAI_SPLIT_MODEL names one. Printed headers don't need the big one."""
+    explicit = (os.getenv("OPENAI_SPLIT_MODEL") or "").strip()
+    if explicit:
+        return explicit
+    candidates = [m for m in (model_name(), second_read_model()) if m]
+    return min(candidates, key=model_rank) if candidates else model_name()
+
+
+STRIP_DETAIL = (os.getenv("SPLIT_IMAGE_DETAIL") or "high").strip().lower()
+STRIP_RETRIES = 4
+
+
+def _strip_rect(box: Optional[dict[str, Any]], band: float) -> Optional[dict[str, float]]:
+    """A box on the strip as a box on the whole page."""
+    if not box or not box.get("found"):
+        return None
+    found = boxes.sane_grid({**box, "y0": box.get("y0", 0) * band, "y1": box.get("y1", 0) * band})
+    return found
+
+
+async def extract_page_headers(batch: list[tuple[int, str]],
+                               band: float = 0.24) -> dict[int, dict[str, Any]]:
+    """The header of each page from its strip: one call for the whole batch."""
+    parts: list[dict[str, Any]] = [{"type": "text", "text": (
+        f"{len(batch)} header strip(s) follow. Return one entry per page.")}]
+    for page, url in batch:
+        parts.append({"type": "text", "text": f"Page {page}:"})
+        parts.append({"type": "image_url", "image_url": {"url": url, "detail": STRIP_DETAIL}})
+    messages = [{"role": "system", "content": PAGE_HEADERS_RULES},
+                {"role": "user", "content": parts}]
+    model = split_model()
+    for attempt in range(STRIP_RETRIES):
+        try:
+            result = await _complete(messages, PAGE_HEADERS_SCHEMA, "page_headers", model=model,
+                                     timeout=max(HEADER_TIMEOUT, 60.0),
+                                     max_tokens=250 * len(batch) + 200)
+            break
+        except ExtractionUnavailable as exc:
+            # A burst of strips can trip a rate limit; that passes in seconds.
+            if "busy" not in str(exc) or attempt == STRIP_RETRIES - 1:
+                raise
+            await asyncio.sleep(2 * 2 ** attempt)
+    wanted = {page for page, _ in batch}
+    out: dict[int, dict[str, Any]] = {}
+    for row in result.get("pages") or []:
+        try:
+            page = int(row.get("page"))
+        except (TypeError, ValueError):
+            continue
+        if page not in wanted or page in out:
+            continue
+        try:
+            confidence = max(0.0, min(1.0, float(row.get("confidence"))))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        rects = {name: rect for name, rect in (
+            ("protocol_no", _strip_rect(row.get("protocol_box"), band)),
+            ("screening_no", _strip_rect(row.get("screening_box"), band)),
+            ("visit_label", _strip_rect(row.get("visit_box"), band))) if rect}
+        out[page] = {"has_header": bool(row.get("has_header")),
+                     "protocol_no": row.get("protocol_no"),
+                     "screening_no": row.get("screening_no"),
+                     "visit": row.get("visit"), "visit_date": row.get("visit_date"),
+                     "confidence": confidence, "rects": rects}
+    usage = result.get("_usage") or {}
+    out[-1] = {"usage": {**usage, "model": usage.get("model") or model}}
+    return out
+
+
 def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
     prompt = completion = 0
     models: list[str] = []
@@ -774,31 +914,80 @@ def _merge_usage(parts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _chunks(images: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Pages in model-sized groups. An empty list is one call with no images."""
+    if not images:
+        return [[]]
+    size = max(1, MAX_PAGE_IMAGES)
+    return [images[i:i + size] for i in range(0, len(images), size)]
+
+
+def _merge_chunks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per field across the chunks of a long CRF: a value beats a blank,
+    and of two values the surer read stands."""
+    best: dict[tuple, dict[str, Any]] = {}
+    order: list[tuple] = []
+    for result in results:
+        for row in result.get("values") or []:
+            key = (row.get("section_id"), row.get("group_id"), row.get("instance", 1),
+                   row.get("field_id"))
+            if key not in best:
+                best[key] = row
+                order.append(key)
+                continue
+            held = best[key]
+            if held.get("value") in (None, "") and row.get("value") not in (None, ""):
+                best[key] = row
+            elif row.get("value") not in (None, "") and \
+                    float(row.get("confidence") or 0) > float(held.get("confidence") or 0):
+                best[key] = row
+    return [best[k] for k in order]
+
+
 async def _extract_sections(document: str, form: dict[str, Any],
                             header: dict[str, Any],
                             images: Optional[list[tuple[int, str]]] = None,
                             model: Optional[str] = None,
-                            with_boxes: bool = True) -> dict[str, Any]:
+                            with_boxes: bool = True,
+                            routes: Optional[dict[str, list[int]]] = None) -> dict[str, Any]:
     """One completion per CRF, in parallel — wall clock is the slowest section.
 
     A visit with two CRFs was a single 70s call. Splitting keeps each prompt to
     one block (which is how the page is printed) so two ~20s calls overlap.
+
+    `routes` gives each CRF only the pages it is printed on; without it every
+    CRF sees every page. A CRF spread over more pages than one call takes is
+    read in chunks and the chunks merged, so no page is ever dropped.
     """
     sections = form.get("sections") or []
     schema = FORM_SCHEMA if with_boxes else FORM_SCHEMA_NO_BOX
-    if len(sections) <= 1:
-        return await _complete(form_prompt(document, form, header, images, with_boxes),
-                               schema, "crf_form", model=model)
+    images = images or []
+    by_page = dict(images)
 
-    async def one(section: dict[str, Any]) -> dict[str, Any]:
+    def pages_for(section: Optional[dict[str, Any]]) -> list[tuple[int, str]]:
+        if section is None or not routes or section["section_id"] not in routes:
+            return images
+        wanted = [(p, by_page[p]) for p in routes[section["section_id"]] if p in by_page]
+        return wanted or images
+
+    async def one(section: Optional[dict[str, Any]]) -> dict[str, Any]:
         started = time.monotonic()
-        mini = {**form, "sections": [section]}
-        result = await _complete(form_prompt(document, mini, header, images, with_boxes),
-                                 schema, "crf_form", model=model)
-        log.info("section %s (%s) read in %.1fs (%s value(s))",
-                 section.get("section_id"), section.get("name"),
-                 time.monotonic() - started, len(result.get("values") or []))
+        mini = form if section is None else {**form, "sections": [section]}
+        mine = pages_for(section)
+        parts = await asyncio.gather(*[
+            _complete(form_prompt(document, mini, header, chunk, with_boxes),
+                      schema, "crf_form", model=model)
+            for chunk in _chunks(mine)])
+        result = (parts[0] if len(parts) == 1 else
+                  {"values": _merge_chunks(list(parts)), "_usage": _merge_usage(list(parts))})
+        if section is not None:
+            log.info("section %s (%s) read in %.1fs from %s page(s) (%s value(s))",
+                     section.get("section_id"), section.get("name"),
+                     time.monotonic() - started, len(mine), len(result.get("values") or []))
         return result
+
+    if len(sections) <= 1:
+        return await one(sections[0] if sections else None)
 
     gathered = await asyncio.gather(
         *[one(section) for section in sections], return_exceptions=True
@@ -851,18 +1040,27 @@ source document. A form is a titled block that collects data, such as "Vital Sig
 - If you are unsure whether a heading is a form of its own, leave it out."""
 
 
+ROUTE_DETAIL = (os.getenv("ROUTE_IMAGE_DETAIL") or "low").strip().lower()
+# Visits this short are read whole: a page map would cost about what it saves.
+ROUTE_MIN_PAGES = max(1, int(os.getenv("ROUTE_MIN_PAGES") or 3))
+
+
 async def extract_form_titles(document: str,
                               images: Optional[list[tuple[int, str]]] = None,
-                              model: Optional[str] = None) -> list[dict[str, Any]]:
+                              model: Optional[str] = None,
+                              detail: str = "high",
+                              spent: Optional[list] = None) -> list[dict[str, Any]]:
     """The forms printed in the document, by title and first page."""
     messages = [
         {"role": "system", "content": FORM_TITLES_RULES},
         {"role": "user", "content": _with_images(
             "List the forms in this source document.\n\nDocument:\n\n" + document,
-            images or [])},
+            images or [], detail)},
     ]
     result = await _complete(messages, FORM_TITLES_SCHEMA, "crf_titles", model=model,
-                             max_tokens=1200)
+                             max_tokens=1200 + 60 * len(images or []))
+    if spent is not None:
+        spent.append(result)
     out, seen = [], set()
     for item in result.get("forms") or []:
         title = " ".join(str((item or {}).get("title") or "").split())[:120]
@@ -1037,24 +1235,45 @@ def reconcile(first: list[dict[str, Any]],
 
 async def extract_form(document: str, form: dict[str, Any], header: dict[str, Any],
                        pages: Optional[dict[str, str]] = None) -> dict[str, Any]:
-    images = page_images(pages)
+    images = page_images(pages, cap=False)
     primary, second_model = read_models(bool(images))
-    reads = [_extract_sections(document, form, header, images, model=primary)]
+    sections = form.get("sections") or []
+    titles: Optional[list[dict[str, Any]]] = None
+    routes: Optional[dict[str, list[int]]] = None
+    title_spend: list[dict[str, Any]] = []
+    # Which forms are on which pages, from one cheap look at every page (small
+    # model, low detail). Each CRF is then read from its own pages only, instead
+    # of every CRF call carrying the whole visit twice over.
+    if images and len(images) >= ROUTE_MIN_PAGES:
+        try:
+            titles = await extract_form_titles(document, images, model=split_model(),
+                                               detail=ROUTE_DETAIL, spent=title_spend)
+            import visit_forms
+            routes = visit_forms.section_pages(sections, titles, [p for p, _ in images])
+            log.info("page routes: %s", {k: v for k, v in (routes or {}).items()})
+        except Exception as exc:
+            log.warning("form titles could not be read; every CRF sees every page: %s", exc)
+            titles, routes = None, None
+    reads = [_extract_sections(document, form, header, images, model=primary, routes=routes)]
     if second_model:
         reads.append(_extract_sections(document, form, header, images, model=second_model,
-                                       with_boxes=False))
-    # Which forms the scan holds, read alongside: it only feeds a warning, so a
-    # failure here never costs the values.
-    titles_task = asyncio.ensure_future(extract_form_titles(document, images, model=primary))
+                                       with_boxes=False, routes=routes))
+    # On a short visit the titles are read alongside: they only feed a warning,
+    # so a failure here never costs the values.
+    titles_task = (None if titles is not None or not images else asyncio.ensure_future(
+        extract_form_titles(document, images, model=split_model(), detail=ROUTE_DETAIL,
+                            spent=title_spend)))
     gathered = await asyncio.gather(*reads, return_exceptions=True)
     if isinstance(gathered[0], BaseException):
-        titles_task.cancel()
+        if titles_task is not None:
+            titles_task.cancel()
         raise gathered[0]
-    try:
-        titles: Optional[list[dict[str, Any]]] = await titles_task
-    except Exception as exc:
-        log.warning("form titles could not be read: %s", exc)
-        titles = None
+    if titles_task is not None:
+        try:
+            titles = await titles_task
+        except Exception as exc:
+            log.warning("form titles could not be read: %s", exc)
+            titles = None
 
     first = _form_rows(gathered[0], form)
     second: Optional[list[dict[str, Any]]] = None
@@ -1067,12 +1286,14 @@ async def extract_form(document: str, form: dict[str, Any], header: dict[str, An
         else:
             second = _form_rows(gathered[1], form)["values"]
             usages.append(gathered[1])
+    usages.extend(title_spend)
 
     values = reconcile(first["values"], second, prefer_second=False)
     if second is not None:
         log.info("second read on %s: %s of %s value(s) disagree", second_model,
                  sum(1 for row in values if not row.get("agreed")), len(values))
     return {**first, "values": values, "images": len(images),
+            "routes": routes,
             "second_read": second_model if second is not None else None,
             "primary_read": primary,
             "form_titles": titles,

@@ -346,18 +346,26 @@
         WH.ui.toast({ message: "The review screen is still loading. Try again in a moment.", kind: "warn" });
         return;
       }
-      // Fetch the document for the breadcrumb and recents in parallel.
-      WH.api(`/api/docs/${encodeURIComponent(id)}`)
-        .then((data) => {
-          const doc = data.document;
-          if (!doc) return;
-          WH.recentDocs.add(doc);
-          if (current && current.ctx.params.docId === id) WH.bus.emit("crumbs:doc", doc);
-        })
-        .catch(() => {});
+      // The document, for the breadcrumb and recents. A file of several visits
+      // isn't reviewed itself: it opens on its visits instead.
+      let doc = null;
+      try {
+        doc = (await WH.api(`/api/docs/${encodeURIComponent(id)}`)).document || null;
+      } catch {
+        doc = null;
+      }
+      if (doc && doc.kind === "parent") {
+        location.replace(href(`/split/${encodeURIComponent(id)}`));
+        return;
+      }
+      if (doc) {
+        WH.recentDocs.add(doc);
+        if (current && current.ctx.params.docId === id) WH.bus.emit("crumbs:doc", doc);
+      }
       lastOpenedDoc = id;
       try {
         await review.open(id);
+        if (WH.visitStrip && current && current.ctx.params.docId === id) WH.visitStrip.show(doc);
       } catch (error) {
         WH.ui.toast({
           message: "This document couldn't be opened",

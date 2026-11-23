@@ -124,7 +124,7 @@ async def _heartbeat(extraction_id: str, token: str) -> None:
 async def _finish(extraction_id: str, status: str, token: str, *, error: Optional[str] = None,
                   snapshot: Optional[dict[str, Any]] = None, usage: Optional[dict] = None,
                   models: Optional[dict] = None, header: Optional[dict] = None,
-                  retry: bool = False) -> None:
+                  retry: bool = False, split: bool = False) -> None:
     async with db.session() as session:
         query = select(db.Extraction).where(db.Extraction.id == extraction_id)
         if not db.is_sqlite():
@@ -162,7 +162,11 @@ async def _finish(extraction_id: str, status: str, token: str, *, error: Optiona
             if problem and status == "ready":
                 status, error = "needs_input", problem
             extraction.status, extraction.error = status, error
-        if document is not None:
+        if document is not None and split:
+            # Waiting for a person to confirm which visits to read, not for a header.
+            extraction.stage = "split"
+            document.status = "split_review"
+        elif document is not None:
             if status == "ready" and snapshot and snapshot.get("payload"):
                 stats = documents.summarise_payload(snapshot["payload"])
                 document.flags, document.conflicts = stats["flags"], stats["conflicts"]
@@ -174,6 +178,8 @@ async def _finish(extraction_id: str, status: str, token: str, *, error: Optiona
                 document.status = "ready"
         action = {"ready": "extraction.completed", "cancelled": "extraction.cancelled"}.get(
             status, "extraction.failed")
+        if split:
+            action = "extraction.completed"
         await audit.record(session, action, username=extraction.created_by, document=document,
                            new_value=status, details={"extraction_id": extraction.id,
                                                       "error": error, "models": models,
@@ -209,12 +215,54 @@ async def record_ai_values(session, document, extraction, payload: dict[str, Any
 
 # --------------------------------------------------------------------------- one run
 
-WORKING_KEYS = ("header_rows", "header_usage", "visit_definition")
+WORKING_KEYS = ("header_rows", "header_usage", "visit_definition", "edc_names")
 
 
 def working_meta(meta: dict[str, Any]) -> dict[str, Any]:
     """The parts of a job's Redis meta needed to rebuild it after Redis lets it lapse."""
     return {key: meta[key] for key in WORKING_KEYS if key in meta}
+
+
+class SplitNeeded(Exception):
+    """The file holds several visits (or needs a person to say what it holds)."""
+
+
+async def _split_stage(document_id: str, version_no: int, sha: str, data: bytes,
+                       owner: str, max_pages: int) -> tuple[Optional[list[int]], dict[str, Any]]:
+    """Read the file's structure. Returns (pages to read, header seed) for a file
+    that is one visit; raises SplitNeeded for anything a person has to look at."""
+    import splits
+    import splitter
+
+    try:
+        split = await splits.scan(document_id, version_no, sha, data, owner)
+    except render_error() as exc:
+        raise Permanent(str(exc)) from exc
+    result = split.plan or {}
+    decision = splits.decide(result, max_pages)
+    if decision == "review":
+        async with db.session() as session:
+            document = await session.get(db.Document, document_id)
+            message = await splits.park_for_review(session, document, split)
+            await session.commit()
+        raise SplitNeeded(message)
+    if decision == "whole":
+        return None, {}
+    segment = result["segments"][0]
+    pages = splits.single_pages(result)
+    async with db.session() as session:
+        document = await session.get(db.Document, document_id)
+        document.pages = pages
+        document.visit_label = segment["label"]
+        document.fingerprint = segment["fingerprint"]
+        await session.commit()
+    return pages, {"header_rows": splitter.header_seed(result, segment), "header_usage": {},
+                   "edc_names": segment["edc_names"]}
+
+
+def render_error():
+    import render
+    return render.RenderError
 
 
 async def _run(extraction_id: str, token: str) -> None:
@@ -236,18 +284,30 @@ async def _run(extraction_id: str, token: str) -> None:
         ).scalar()
         job_id, owner, filename = extraction.job_id, extraction.created_by, document.filename
         sha = version.sha256
+        kind, version_no = document.kind, version.version
+        # What the split already read for this run: a visit cut from a larger
+        # file arrives with its header, so the header is never read twice.
+        seed = dict((extraction.snapshot or {}).get("meta") or {})
     primary, secondary = fields.read_models(True)
     models = {"primary": primary, "secondary": secondary, "preferred": fields.preferred_read()}
 
-    await _stage(extraction_id, "render", token)
     data = await blobstore.get(sha)
+    pages: Optional[list[int]] = None
+    if kind != "child":
+        await _stage(extraction_id, "split", token)
+        pages, found = await _split_stage(document.id, version_no, sha, data, owner,
+                                          web.MAX_PAGES)
+        seed = {**seed, **found}
+
+    await _stage(extraction_id, "render", token)
     try:
-        images = await render.page_images(data, web.MAX_PAGES)
+        images = await render.page_images(data, web.MAX_PAGES, only=pages)
     except render.RenderError as exc:
         raise Permanent(str(exc)) from exc
     # A retried run keeps what its earlier attempt already read (the header).
     previous = await store.get_job(job_id) or {}
-    meta = {**{k: previous[k] for k in WORKING_KEYS if k in previous},
+    meta = {**{k: seed[k] for k in WORKING_KEYS if k in seed},
+            **{k: previous[k] for k in WORKING_KEYS if k in previous},
             "job_id": job_id, "filename": filename, "mode": "vision", "parser": "vision",
             "pages": len(images), "owner": owner, "document_id": document.id,
             "extraction_id": extraction_id}
@@ -272,9 +332,13 @@ async def _run(extraction_id: str, token: str) -> None:
                          "them in.", base_snapshot, triple)
 
     await _stage(extraction_id, "visit", token)
+    import splitter
+    names = splitter.edc_names(triple["visit_name"]) + [
+        n for n in (meta.get("edc_names") or [])
+        if splitter.visit_key(n) == splitter.visit_key(triple["visit_name"])]
     try:
-        visit = await edc.get_visit(triple["protocol_no"], triple["screening_no"],
-                                    triple["visit_name"])
+        visit, triple["visit_name"] = await edc.find_visit(
+            triple["protocol_no"], triple["screening_no"], names or [triple["visit_name"]])
     except edc.EdcUnavailable as exc:
         if "did not recognise" in str(exc):
             raise NeedsInput(str(exc), base_snapshot, triple) from exc
@@ -308,6 +372,8 @@ async def process(extraction_id: str, token: str) -> None:
         log.info("extraction %s finished in %.1fs", extraction_id, time.monotonic() - started)
     except LostLease:
         log.warning("extraction %s was taken over by another worker", extraction_id)
+    except SplitNeeded as exc:
+        await _finish(extraction_id, "needs_input", token, error=str(exc), split=True)
     except Cancelled:
         await _finish(extraction_id, "cancelled", token, error="Cancelled.")
     except NeedsInput as exc:

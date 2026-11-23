@@ -12,6 +12,7 @@
   const { h, ui } = WH;
 
   const STAGES = [
+    { id: "split", label: "Find visits" },
     { id: "render", label: "Render pages" },
     { id: "header", label: "Read header" },
     { id: "visit", label: "Match visit" },
@@ -355,7 +356,13 @@
       const tbody = h("tbody");
       sorted.forEach((item) => {
         const actions = h("div", { class: "wh-row-actions" });
-        if ((item.status === "ready" || item.status === "needs_input") && item.document_id != null) {
+        if (item.status === "needs_input" && item.stage === "split" && item.document_id != null) {
+          actions.appendChild(h("a", {
+            class: ["btn", "wh-btn", "wh-btn-xs", "btn-primary"],
+            href: `#/split/${encodeURIComponent(item.document_id)}`,
+            dataset: { focusKey: `split-${item.extraction_id}` },
+          }, "Choose visits", ui.icon("arrow-right", { size: 14 })));
+        } else if ((item.status === "ready" || item.status === "needs_input") && item.document_id != null) {
           actions.appendChild(h("a", {
             class: ["btn", "wh-btn", "wh-btn-xs", item.status === "ready" ? "btn-primary" : "btn-quiet"],
             href: `#/review/${encodeURIComponent(item.document_id)}`,

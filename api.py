@@ -567,7 +567,7 @@ async def list_docs(request: Request, status: Optional[str] = None, q: Optional[
             select(db.Document.status, func.count()).where(*live)
             .group_by(db.Document.status))).all()
         counts = {"processing": 0, "ready": 0, "in_review": 0, "submitted": 0, "failed": 0,
-                  "needs_input": 0}
+                  "needs_input": 0, "split_review": 0, "split": 0}
         for st, n in counts_rows:
             counts[st] = counts.get(st, 0) + int(n)
         counts["archived"] = int(archived_count)
@@ -585,6 +585,19 @@ async def list_docs(request: Request, status: Optional[str] = None, q: Optional[
             draft = await esource.latest_draft(session, document.id)
             out.append(documents.doc_dict(document, extraction,
                                           draft.revision if draft else None))
+        # A file of several visits shows how far its visits have got.
+        parents = [d["id"] for d in out if d.get("kind") == "parent"]
+        if parents:
+            rows = (await session.execute(
+                select(db.Document.parent_id, db.Document.status, func.count())
+                .where(db.Document.parent_id.in_(parents))
+                .group_by(db.Document.parent_id, db.Document.status))).all()
+            tally: dict[str, dict[str, int]] = {}
+            for parent_id, st, n in rows:
+                tally.setdefault(parent_id, {})[st] = int(n)
+            for item in out:
+                if item.get("kind") == "parent":
+                    item["children"] = tally.get(item["id"], {})
     try:
         held = await locks.holders([d["id"] for d in out])
     except Exception as exc:  # the list still loads without lock badges
@@ -614,6 +627,11 @@ async def open_review(document_id: str, request: Request) -> dict[str, Any]:
     user = await current(request)
     async with db.session() as session:
         document = await _document(session, document_id, user)
+        if document.kind == "parent":
+            # A file of several visits isn't reviewed itself; its visits are.
+            raise HTTPException(409, {"message": "This file holds several visits. Open it to "
+                                                 "choose and review its visits.",
+                                      "split": document.id})
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
@@ -692,6 +710,127 @@ async def doc_file(document_id: str, request: Request, version: Optional[int] = 
                     headers={"Content-Disposition": f'inline; filename="{safe}"',
                              "X-Content-SHA256": row.sha256,
                              "Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/docs/{document_id}/pages/{number}/thumb")
+async def page_thumb(document_id: str, number: int, request: Request,
+                     scale: float = 0.32) -> Response:
+    """One page of the document's current file, small, for the split screen."""
+    import render
+
+    user = await current(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        version = await documents.latest_version(session, document.id)
+        if version is None:
+            raise HTTPException(404, "That file could not be found.")
+    cached = render.cached_thumbnail(version.sha256, number) if scale == 0.32 else None
+    try:
+        if cached is not None:
+            image = cached
+        else:
+            data = await blobstore.get(version.sha256)
+            image = await render.thumbnail(data, number, scale)
+    except render.RenderError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except (FileNotFoundError, blobstore.BlobCorrupted) as exc:
+        raise HTTPException(404, "The stored original is missing or damaged.") from exc
+    return Response(image, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=86400",
+                             "ETag": f'"{version.sha256[:16]}-{number}-{scale}"'})
+
+
+# --------------------------------------------------------------------------- splits
+
+
+class SplitEdits(BaseModel):
+    edits: dict[str, Any] = {}
+
+
+class SplitConfirm(BaseModel):
+    edits: Optional[dict[str, Any]] = None
+    reason: Optional[str] = None
+
+
+async def _split_of(session, document: db.Document):
+    import splits
+
+    split = await splits.get_split(session, document.id, document.current_version)
+    if split is None:
+        raise HTTPException(404, "This file hasn't been checked for visits yet.")
+    return split
+
+
+def _split_error(exc) -> HTTPException:
+    return HTTPException(getattr(exc, "status", 422), str(exc))
+
+
+@router.get("/docs/{document_id}/split")
+async def get_split(document_id: str, request: Request) -> dict[str, Any]:
+    import splits
+
+    user = await current(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        split = await _split_of(session, document)
+        out = await splits.view(session, document, split, user)
+    held = None
+    try:
+        if user.role in ("reviewer", "admin") and out["document"].get("archived") is None:
+            _, held = await locks.acquire(document_id, user.username, user.full_name)
+        else:
+            held = await locks.holder(document_id)
+    except Exception as exc:  # the screen still opens without lock badges
+        log.warning("record lock unavailable for the split screen: %s", exc)
+    out["lock"] = locks.public(held, user.username)
+    out["readonly"] = user.role == "monitor" or out["document"].get("archived") is not None
+    return out
+
+
+@router.put("/docs/{document_id}/split")
+async def save_split(document_id: str, body: SplitEdits, request: Request) -> dict[str, Any]:
+    """Save the reviewer's corrections as they make them. Nothing is read yet."""
+    import splits
+
+    user = await writer(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        if document.archived_at is not None:
+            raise HTTPException(409, ARCHIVED)
+        ok, held = await locks.acquire(document.id, user.username, user.full_name)
+        if not ok:
+            raise _locked_out(held)
+        split = await _split_of(session, document)
+        await splits.save_edits(session, document, split, body.edits, user.username,
+                                client_ip(request))
+        await session.commit()
+        return await splits.view(session, document, split, user)
+
+
+@router.post("/docs/{document_id}/split/confirm")
+async def confirm_split(document_id: str, body: SplitConfirm, request: Request) -> dict[str, Any]:
+    """Create a document for every chosen visit and queue them to be read."""
+    import splits
+
+    user = await writer(request)
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        ok, held = await locks.acquire(document.id, user.username, user.full_name)
+        if not ok:
+            raise _locked_out(held)
+    try:
+        result = await splits.confirm(document_id, body.edits, user.username,
+                                      reason=body.reason, client_ip=client_ip(request), user=user)
+    except splits.SplitError as exc:
+        raise _split_error(exc) from exc
+    try:
+        await locks.release(document_id, user.username)
+    except Exception:
+        pass
+    async with db.session() as session:
+        document = await _document(session, document_id, user)
+        split = await _split_of(session, document)
+        return {"result": result, **(await splits.view(session, document, split, user))}
 
 
 class AssignRequest(BaseModel):
@@ -941,6 +1080,11 @@ async def save_draft(document_id: str, body: DraftRequest, request: Request) -> 
         document = await _document(session, document_id, user)
         await _guard_write(session, document, user)
         right = await require_duty(request, user, "review", document)
+        if document.kind == "parent":
+            # A file of several visits isn't reviewed itself; its visits are.
+            raise HTTPException(409, {"message": "This file holds several visits. Open it to "
+                                                 "choose and review its visits.",
+                                      "split": document.id})
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")
@@ -1096,6 +1240,11 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
 
     async with db.session() as session:
         document = await _document(session, document_id, user)
+        if document.kind == "parent":
+            # A file of several visits isn't reviewed itself; its visits are.
+            raise HTTPException(409, {"message": "This file holds several visits. Open it to "
+                                                 "choose and review its visits.",
+                                      "split": document.id})
         extraction = await esource.current_extraction(session, document.id)
         if extraction is None:
             raise HTTPException(409, "This document hasn't been read yet.")

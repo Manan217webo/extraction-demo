@@ -25,7 +25,7 @@ from sqlalchemy import (JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utcnow() -> dt.datetime:
@@ -133,6 +133,22 @@ class Document(Base):
     # Later than the last submission = open for changes; earlier or NULL = not.
     reopened_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
     reopened_by: Mapped[Optional[str]] = mapped_column(String(128))
+    # A file holding several visits is a "parent": it is split, not read. Each
+    # visit in it becomes a "child" document of its own (a slice of the parent's
+    # pages) that is read, reviewed, signed and submitted like any single file.
+    # NULL = a plain single-visit document, as before.
+    kind: Mapped[Optional[str]] = mapped_column(String(12), index=True)
+    parent_id: Mapped[Optional[str]] = mapped_column(String(32), index=True)
+    # The visit as printed on the form ("Visit 3 On Treatment Visits: Week 2").
+    visit_label: Mapped[Optional[str]] = mapped_column(Text)
+    # Which of the file's pages to read (numbered from 1); NULL = all of them.
+    # A child's own file holds only its pages, so this stays NULL there.
+    pages: Mapped[Optional[list[Any]]] = mapped_column(JSON)
+    # The visit's pages as they look, so the same sheets are recognised when
+    # they come back inside another file.
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    # For a child: the parent's original page numbers this slice was cut from.
+    source_pages: Mapped[Optional[list[Any]]] = mapped_column(JSON)
     __table_args__ = (UniqueConstraint("source_id", "path", name="uq_document_source_path"),)
 
 
@@ -177,6 +193,32 @@ class Extraction(Base):
     # The worker that holds the lease. Every progress write is conditional on
     # it, so a run re-claimed after its lease lapsed can't be finished twice.
     claimed_by: Mapped[Optional[str]] = mapped_column(String(64))
+
+
+class Split(Base):
+    """How one version of a file divides into visits: what the pages said, and
+    what a reviewer changed before confirming. Confirming creates the children."""
+
+    __tablename__ = "splits"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[dt.datetime] = mapped_column(TZDateTime(), default=utcnow)
+    created_by: Mapped[str] = mapped_column(String(128))
+    # The plan as read from the pages (splitter.plan), never changed afterwards.
+    plan: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # The reviewer's corrections (splitter.apply_edits), saved as they work.
+    edits: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
+    edits_saved_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
+    edits_saved_by: Mapped[Optional[str]] = mapped_column(String(128))
+    # proposed | confirmed | superseded
+    status: Mapped[str] = mapped_column(String(16), default="proposed", index=True)
+    confirmed_at: Mapped[Optional[dt.datetime]] = mapped_column(TZDateTime())
+    confirmed_by: Mapped[Optional[str]] = mapped_column(String(128))
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    usage: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON)
+    __table_args__ = (UniqueConstraint("document_id", "version", name="uq_split_doc_version"),)
 
 
 class Batch(Base):

@@ -1,0 +1,159 @@
+/* Webo Healthtech eSource — Visits in a file (#/split/:id) and the visit strip
+   above a visit's review. Uses the tokens from shell.css, so dark mode follows. */
+
+.wh-banner--info { background: var(--info-bg); color: var(--info-ink); border-color: var(--info-line); }
+.wh-banner--danger { background: var(--danger-bg); color: var(--danger-ink); border-color: var(--danger-line); }
+
+.wh-split { display: grid; gap: var(--sp-4); padding-bottom: 96px; }
+
+/* ------------------------------------------------------------ identity */
+
+.wh-split-identity {
+  display: flex; flex-wrap: wrap; gap: var(--sp-4) var(--sp-6); align-items: flex-start;
+  padding: var(--sp-4) var(--sp-5);
+}
+.wh-split-id { display: grid; gap: 6px; min-width: 220px; flex: 0 1 280px; }
+.wh-split-id .wh-input { font-variant-numeric: tabular-nums; }
+.wh-split-id-note { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--text-3); }
+.wh-split-id.is-warn .wh-split-id-note { color: var(--warn-ink); }
+.wh-split-id.is-danger .wh-split-id-note { color: var(--danger-ink); }
+.wh-split-id.is-danger .wh-input { border-color: var(--danger-line); }
+.wh-split-issues { flex: 1 1 100%; margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.wh-split-issues li { display: flex; gap: 6px; align-items: baseline; font-size: var(--fs-sm); color: var(--warn-ink); }
+
+/* ---------------------------------------------------------------- grid */
+
+.wh-split-grid {
+  display: grid; gap: var(--sp-4);
+  grid-template-columns: minmax(300px, 400px) minmax(0, 1fr);
+  align-items: start;
+}
+@media (max-width: 960px) { .wh-split-grid { grid-template-columns: 1fr; } }
+
+.wh-split-col--visits {
+  position: sticky; top: calc(var(--topbar-h) + var(--sp-4));
+  max-height: calc(100vh - var(--topbar-h) - 140px); overflow: auto;
+  padding-right: 2px;
+}
+@media (max-width: 960px) { .wh-split-col--visits { position: static; max-height: none; } }
+
+.wh-split-visits { display: grid; gap: var(--sp-3); }
+
+/* --------------------------------------------------------------- cards */
+
+.wh-split-card {
+  display: grid; gap: 8px; padding: 12px 14px 12px 12px;
+  border-left: 4px solid var(--visit, var(--border-2));
+  transition: box-shadow var(--t-fast), border-color var(--t-fast), opacity var(--t-fast);
+}
+.wh-split-card.is-selected { box-shadow: var(--e2); }
+.wh-split-card.is-focused { outline: 2px solid var(--visit); outline-offset: 1px; }
+.wh-split-card:not(.is-selected):not(.is-sent) .wh-split-card-title { color: var(--text-3); }
+.wh-split-card-head { display: flex; align-items: flex-start; gap: 10px; }
+.wh-split-swatch { width: 10px; height: 10px; border-radius: 3px; margin-top: 5px; flex: none; }
+.wh-split-check { width: 18px; height: 18px; margin-top: 2px; flex: none; accent-color: var(--primary-bg); cursor: pointer; }
+.wh-split-check:disabled { cursor: not-allowed; }
+.wh-split-card-titles { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.wh-split-card-title { font-size: var(--fs-base); line-height: 1.35; overflow-wrap: anywhere; }
+.wh-split-card-sub { font-size: var(--fs-sm); color: var(--text-3); }
+.wh-split-card-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.wh-split-stage { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-sm); }
+.wh-split-note {
+  display: flex; gap: 6px; align-items: flex-start; margin: 0; padding: 7px 9px;
+  border-radius: 8px; font-size: var(--fs-sm); line-height: 1.45;
+}
+.wh-split-note .wh-icon { flex: none; margin-top: 2px; }
+.wh-split-note.is-warn { background: var(--warn-bg); color: var(--warn-ink); }
+.wh-split-note.is-info { background: var(--info-bg); color: var(--info-ink); }
+.wh-split-note a { color: inherit; font-weight: 700; }
+
+.wh-split-ignored {
+  border: 1px dashed var(--border-2); border-radius: var(--r-md); padding: 10px 12px;
+  font-size: var(--fs-sm); background: var(--surface-2);
+}
+.wh-split-ignored summary { cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.wh-split-ignored p { margin: 8px 0 6px; }
+.wh-split-ignored ul { margin: 0; padding-left: 18px; display: grid; gap: 3px; }
+
+/* --------------------------------------------------------------- pages */
+
+.wh-split-col--pages { min-width: 0; }
+.wh-split-toolbar-slot {
+  position: sticky; top: var(--topbar-h); z-index: 3;
+  background: var(--bg); padding: 4px 0 10px;
+}
+.wh-split-hint { margin: 4px 2px; font-size: var(--fs-sm); }
+.wh-split-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--accent-line); box-shadow: var(--e2);
+}
+.wh-split-target { width: auto; min-width: 200px; max-width: 320px; height: var(--control-h-sm); }
+
+.wh-split-thumbs {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; gap: 14px 12px; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+}
+.wh-split-thumb { display: grid; gap: 5px; min-width: 0; transition: opacity var(--t-fast); }
+.wh-split-thumb.is-dim { opacity: 0.32; }
+.wh-split-thumb-btn {
+  position: relative; display: block; padding: 0; cursor: pointer;
+  border: 2px solid var(--visit, var(--border-2)); border-top-width: 6px;
+  border-radius: 8px; overflow: hidden; background: #fff;
+  aspect-ratio: 612 / 792;
+  transition: transform var(--t-fast), box-shadow var(--t-fast);
+}
+.wh-split-thumb-btn:hover { transform: translateY(-1px); box-shadow: var(--e2); }
+.wh-split-thumb-btn:focus-visible { outline: 3px solid var(--focus-ring); outline-offset: 2px; }
+.wh-split-thumb.is-ignored .wh-split-thumb-btn { border-style: dashed; border-color: var(--border-2); border-top-width: 2px; }
+.wh-split-thumb.is-ignored img { opacity: 0.55; filter: grayscale(1); }
+.wh-split-thumb.is-picked .wh-split-thumb-btn { box-shadow: 0 0 0 3px var(--focus-ring); }
+.wh-split-thumb-btn img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.wh-split-thumb-num {
+  position: absolute; left: 5px; bottom: 5px; min-width: 22px; padding: 1px 6px;
+  border-radius: 999px; font-size: 11px; font-weight: 700; text-align: center;
+  background: rgba(16, 12, 28, 0.78); color: #fff;
+}
+.wh-split-thumb-flag, .wh-split-thumb-tick {
+  position: absolute; top: 5px; display: grid; place-items: center;
+  width: 20px; height: 20px; border-radius: 999px;
+}
+.wh-split-thumb-flag { right: 5px; background: var(--warn); color: #3b2500; }
+.wh-split-thumb-tick { left: 5px; background: var(--focus-ring); color: #fff; }
+.wh-split-thumb-label {
+  font-size: 11.5px; line-height: 1.3; color: var(--text-3);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ---------------------------------------------------------------- foot */
+
+.wh-split-foot-slot { position: sticky; bottom: 0; z-index: 4; }
+.wh-split-foot {
+  display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap;
+  margin: 0 calc(-1 * var(--sp-2)); padding: 12px 18px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--e3);
+}
+.wh-split-foot-text { display: grid; gap: 2px; flex: 1; min-width: 240px; font-size: var(--fs-sm); }
+.wh-split-foot-text strong { font-size: var(--fs-md); }
+.wh-split-foot .wh-warn { color: var(--warn-ink); }
+.wh-split-foot .btn[disabled] { cursor: not-allowed; }
+
+.wh-split-confirm-list { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: var(--fs-sm); max-height: 240px; overflow: auto; }
+.wh-split-confirm-list .wh-warn { color: var(--warn-ink); }
+
+/* --------------------------------------------------- strip above review */
+
+.wh-visit-strip {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 0 0 8px; padding: 8px 12px; border-radius: 10px;
+  background: var(--brand-bg, #f2eeff); color: var(--brand-ink, #5a3ad6);
+  border: 1px solid var(--brand-line, #dcd2fe); font-size: 13px;
+}
+.wh-visit-strip .wh-muted { color: inherit; opacity: 0.8; }
+.wh-visit-strip .wh-grow { flex: 1; }
+
+@media (prefers-reduced-motion: reduce) {
+  .wh-split-thumb-btn, .wh-split-card { transition: none; }
+  .wh-split-thumb-btn:hover { transform: none; }
+}

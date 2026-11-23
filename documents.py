@@ -219,6 +219,12 @@ def doc_dict(document: db.Document, extraction: Optional[db.Extraction] = None,
                      if getattr(document, "archived_at", None) else None),
         "reopened": ({"at": iso(document.reopened_at), "by": document.reopened_by}
                      if getattr(document, "reopened_at", None) else None),
+        # Several visits in one file: the file is a "parent", each visit a "child".
+        "kind": getattr(document, "kind", None),
+        "parent_id": getattr(document, "parent_id", None),
+        "visit_label": getattr(document, "visit_label", None),
+        "source_pages": getattr(document, "source_pages", None),
+        "pages": getattr(document, "pages", None),
     }
 
 

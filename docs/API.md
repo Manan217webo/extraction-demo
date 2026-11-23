@@ -66,15 +66,53 @@ differs), `"processing"`, `"failed"`.
 
 `PreviewFile = {path, name, size, sha256, status:"new"|"processed"|"changed"|"processing", prior:{document_id, processed_at, processed_by, submitted}|null}`
 `Batch = {id, number, label, created_at, created_by, total, skipped, counts:{queued, running, ready, failed, cancelled}, done:bool, cancelled:bool}`
-`Item = {extraction_id, document_id, filename, path, status:"queued"|"running"|"ready"|"failed"|"cancelled"|"needs_input", stage:"render"|"header"|"visit"|"read"|"done"|null, error, flags, conflicts, confidence, started_at, finished_at}`
+`Item = {extraction_id, document_id, filename, path, status:"queued"|"running"|"ready"|"failed"|"cancelled"|"needs_input", stage:"split"|"render"|"header"|"visit"|"read"|"done"|null, error, flags, conflicts, confidence, started_at, finished_at}`
+
+## Files holding several visits (split)
+
+Every PDF — uploaded or scanned in a batch — first has its structure read: the header of
+every page (from the PDF's own text when it has any, else from a small image of the top of
+the page, a dozen pages per model call on `OPENAI_SPLIT_MODEL`). Pages are grouped by visit;
+pages that name no visit ("All Applicable", covers, blank sheets) are set aside.
+
+* **One visit** (and not read before): read exactly as before, with the header already filled
+  in; only that visit's pages are read (`Doc.pages`).
+* **Anything else** (several visits, a visit processed before, or no visit names at all): the
+  file becomes a **parent** (`Doc.kind="parent"`, `status:"split_review"`, its run
+  `needs_input` at stage `split`) and nothing is read until a person confirms the split.
+  Confirming creates one **child** document per chosen visit (`kind:"child"`, `parent_id`,
+  `source_pages`) — a PDF of just its pages — and queues it in a new batch. Each child is
+  then read, reviewed, signed and submitted like any single-visit file.
+
+`POST /documents` answers `{status:"SPLIT", split:{document_id, message, visits}, …}` for a
+file that waits for its split; the browser opens `#/split/{document_id}`.
+
+| Method | Path | Body → Response |
+|---|---|---|
+| GET | `/docs/{id}/split` | → `SplitView`. Takes the edit lock for writers. 404 if never scanned. |
+| PUT | `/docs/{id}/split` | `{edits: SplitEdits}` → `SplitView`. Saves the correction as a draft; reads nothing. 423 if someone else has the file open. |
+| POST | `/docs/{id}/split/confirm` | `{edits?: SplitEdits, reason?}` → `{result:{batch_id, created:[{label, document_id, pages}], skipped:[label], busy:[label]}, ...SplitView}`. 422 with the reason when it can't go ahead (no screening number, nothing ticked, two visits with the same name, a visit read before without `reason`). Visits already queued or being read are left alone (`busy`). Visits just sent start unticked. |
+| GET | `/docs/{id}/pages/{n}/thumb?scale=` | One page of the current file as a small JPEG. |
+
+`SplitEdits = {assign:{page: visit_id|"ignore"}, labels:{visit_id: name}, new:[{id, label}], selected:{visit_id: bool}, protocol_no, screening_no}`
+
+`SplitView = {document: Doc, split:{id, version, status:"proposed"|"confirmed", confirmed_at, confirmed_by, edits_saved_at, usage}, page_count, protocol: Vote, screening: Vote, issues:[{code, pages?}], visits:[Visit], ignored:[{page, reason:"no_visit_header"|"not_a_visit"|"blank_page"|"ignored_by_reviewer", label}], pages:[{page, visit_label, source, confidence, protocol_no, screening_no}], edits: SplitEdits, children:{status: n}, lock, readonly}`
+
+`Vote = {value, agreement (0..1), pages_with_value, disagreeing:[{page, value}], corrected?}`
+
+`Visit = {id, key, label (as printed), pages, edc_names (tried in order), confidence, selected, flags:[{code:"inferred_pages"|"misread_pages"|"not_contiguous"|"multiple_dates", pages?, dates?}], prior:{document_id, processed_at, submitted, same_pages}|null, child:{document_id, status, extraction:{id, status, stage, error}, same_pages}|null}`
+
+The EDC is asked for a visit by its printed name first, then by its short name
+(`Visit 3`); the record keeps the name the EDC answered to (`visit_name`) and the printed
+one (`visit_label`).
 
 ## Documents (inbox, review, versions)
 
 | Method | Path | Body → Response |
 |---|---|---|
-| GET | `/docs?status=&q=&protocol=&subject=&assignee=&flagged=&archived=&limit=&offset=` | → `{documents:[Doc], total, counts:{processing, ready, in_review, submitted, failed, needs_input, archived}}`. Archived records are left out unless `archived=true`, which lists only them. Each Doc carries `lock`. |
+| GET | `/docs?status=&q=&protocol=&subject=&assignee=&flagged=&archived=&limit=&offset=` | → `{documents:[Doc], total, counts:{processing, ready, in_review, submitted, failed, needs_input, split_review, split, archived}}`. A parent Doc also carries `children:{status: n}`. Archived records are left out unless `archived=true`, which lists only them. Each Doc carries `lock`. |
 | GET | `/docs/{id}` | → `{document: Doc}` |
-| GET | `/docs/{id}/review` | → Review snapshot (below). Opening is audited. |
+| GET | `/docs/{id}/review` | → Review snapshot (below). Opening is audited. 409 `{detail:{message, split:id}}` for a parent: its visits are reviewed, not the file. |
 | GET | `/docs/{id}/file?version=` | PDF bytes (`application/pdf`) |
 | POST | `/docs/{id}/assign` | `{username|null}` → `{document}` |
 | GET | `/docs/{id}/history` | → `{versions:[{version, sha256, created_at, created_by, reason}], extractions:[{id, version, run, status, created_at, created_by, models, reason}], drafts:[{revision, saved_at, saved_by, autosave, edits:int}], submissions:[{id, submitted_at, submitted_by, status, changes:[…], skipped, signature:{full_name, meaning, signed_at}}]}` |
@@ -89,7 +127,7 @@ differs), `"processing"`, `"failed"`.
 | POST | `/docs/{id}/preflight` | `{payload}` → `{changes:[{crfName, fieldName, label, old, new}], skipped:[{crfName, label, value}], warnings:[str], blocked:[{key,label,reason}], diff_sha}` — reads the EDC fresh. `warnings` names any form on the scan the EDC visit has no CRF for (`payload.missing_forms`). |
 | POST | `/docs/{id}/submit` | `{payload, crops, password, meaning, diff_sha, edits:[Edit]}` → `{status:"sent"|"unchanged", counts, delta, warnings, signature:{full_name, meaning, signed_at}}`. 401 wrong password (no sign-out), 409 the EDC changed since preflight. |
 
-`Doc = {id, filename, path, source_id, status:"processing"|"ready"|"in_review"|"submitted"|"failed"|"needs_input", protocol_no, screening_no, visit_name, flags, conflicts, confidence, assignee, updated_at, current_version, extraction:{id, status, stage, error}, draft_revision, archived:{at, by, reason}|null, reopened:{at, by}|null, lock:Lock|null}`
+`Doc = {id, filename, path, source_id, status:"processing"|"ready"|"in_review"|"submitted"|"failed"|"needs_input"|"split_review"|"split", protocol_no, screening_no, visit_name, flags, conflicts, confidence, assignee, updated_at, current_version, extraction:{id, status, stage, error}, draft_revision, archived:{at, by, reason}|null, reopened:{at, by}|null, lock:Lock|null, kind:null|"parent"|"child", parent_id, visit_label, source_pages, pages}`
 
 `Lock = {username, full_name, since, mine, renew_seconds}`. Opening a review as a reviewer or
 admin takes the lock; the screen renews it every `renew_seconds` and releases it on close; it

@@ -41,6 +41,8 @@ ACTIONS = {
     "document.archived", "document.restored", "document.reopened", "document.lock_released",
     "access.denied",
     "batch.created", "batch.cancelled",
+    "split.scanned", "split.edited", "split.confirmed", "split.visit_skipped",
+    "split.visit_created",
     "extraction.queued", "extraction.started", "extraction.completed", "extraction.failed",
     "extraction.cancelled", "extraction.retried",
     "ai.value_proposed", "ai.conflict_resolved",

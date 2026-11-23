@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Protocol
 
-MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_FILE_BYTES = max(1, int(os.getenv("MAX_UPLOAD_MB") or 200)) * 1024 * 1024
 MAX_LIST = 5000
 MAX_SCAN_FILES = int(os.getenv("SCAN_MAX_FILES") or 2000)
 FS_TIMEOUT = float(os.getenv("SOURCE_TIMEOUT_SECONDS") or 20)

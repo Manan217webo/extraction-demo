@@ -476,6 +476,15 @@ async function runExtraction() {
 
   try {
     const job = await api("/api/documents", { method: "POST", body });
+    if (job.status === "SPLIT" && job.split && job.split.document_id) {
+      // The file holds several visits: they are chosen and read on the split
+      // screen, each becoming a review of its own.
+      stopProcessing();
+      els.runBtn.disabled = false;
+      toast(job.split.message || "This file holds several visits.", "info");
+      location.hash = `#/split/${encodeURIComponent(job.split.document_id)}`;
+      return;
+    }
     state.docId = job.document_id != null ? String(job.document_id) : null;
     state.extractionId = job.extraction_id != null ? job.extraction_id : null;
     setStage("queue");

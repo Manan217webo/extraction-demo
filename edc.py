@@ -284,6 +284,44 @@ async def get_visit(protocol_no: str, screening_no: str,
     return data
 
 
+def _not_found(exc: Exception) -> bool:
+    text = str(exc)
+    return ("did not recognise" in text or "had no CRF data" in text
+            or "rejected the request (4" in text)
+
+
+async def find_visit(protocol_no: str, screening_no: str,
+                     visit_names: list[str]) -> tuple[dict[str, Any], str]:
+    """The visit under the first name the EDC knows, and that name.
+
+    The form prints the visit in full ("Visit 3 On Treatment Visits: Week 2");
+    the EDC may know it by that or by the short name ("Visit 3"). Each is tried
+    in turn; an outage is raised at once rather than tried again under every name.
+    """
+    names: list[str] = []
+    for name in visit_names:
+        name = " ".join(str(name or "").split())
+        if name and name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    if not names:
+        raise EdcUnavailable("The visit name is missing. Check the header and try again.")
+    last: Optional[EdcUnavailable] = None
+    for name in names:
+        try:
+            return await get_visit(protocol_no, screening_no, name), cronos.format_visit_name(name)
+        except EdcUnavailable as exc:
+            if not _not_found(exc):
+                raise
+            last = exc
+    assert last is not None
+    if len(names) > 1:
+        raise EdcUnavailable(
+            "The EDC did not recognise that visit under any of these names: "
+            + ", ".join(f"“{n}”" for n in names)
+            + ". Check the protocol number, screening number and visit name.") from last
+    raise last
+
+
 def image_url(image_id: int | str) -> str:
     return f"{base_url()}/api/EDC/GetVisitCRFImage?imageId={image_id}"
 

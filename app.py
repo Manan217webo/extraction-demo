@@ -41,6 +41,7 @@ import anchors
 import api
 import audit
 import auth
+import blobstore
 import db
 import edc_audit
 import esource
@@ -52,6 +53,8 @@ import fields
 import local_fields
 import mapping
 import render
+import splits
+import splitter
 import store
 import vision
 import visit_forms
@@ -70,7 +73,8 @@ log = logging.getLogger("extraction")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-MAX_BYTES = 50 * 1024 * 1024
+# A whole scanned case report form (80+ pages at 300 dpi) runs well past 50 MB.
+MAX_BYTES = max(1, int(os.getenv("MAX_UPLOAD_MB") or 200)) * 1024 * 1024
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 HEADER_PAGE_LIMIT = max(1, int(os.getenv("HEADER_PAGE_LIMIT") or 3))
 MAX_CONCURRENT_READS = max(1, int(os.getenv("MAX_CONCURRENT_READS") or 3))
@@ -847,10 +851,59 @@ async def _create_vision_job(username: str, filename: str, contents: bytes,
         )
     started = time.monotonic()
     try:
-        images = await render.page_images(contents, MAX_PAGES)
+        count = await asyncio.to_thread(render.page_count, contents)
     except render.RenderError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if count > splits.MAX_SPLIT_PAGES:
+        raise HTTPException(status_code=400, detail=(
+            f"This PDF has {count} pages. Files can have at most {splits.MAX_SPLIT_PAGES}; "
+            "split it into smaller files and upload those."))
     job_id = uuid.uuid4().hex
+    ids = await esource.register_upload(username, filename, contents, count, job_id,
+                                        client_ip=_client_ip(request))
+
+    # Which visits does the file hold? Read from the page headers: free for a typed
+    # PDF, one small call per dozen pages for a scan.
+    only: Optional[list[int]] = None
+    seed: dict[str, Any] = {}
+    try:
+        async with db.session() as session:
+            document = await session.get(db.Document, ids["document_id"])
+            version_no, sha = document.current_version, blobstore.sha256_of(contents)
+        split = await splits.scan(ids["document_id"], version_no, sha, contents, username)
+        result = split.plan or {}
+        decision = splits.decide(result, MAX_PAGES)
+    except render.RenderError as exc:
+        await esource.abandon_upload(ids["extraction_id"], str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except fields.ExtractionUnavailable as exc:
+        # Without the headers the file is read the way it always was, if it can be.
+        log.warning("visit scan of %s unavailable: %s", filename, exc)
+        if count > MAX_PAGES:
+            await esource.abandon_upload(ids["extraction_id"], str(exc))
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        decision, result = "whole", {}
+
+    if decision == "review":
+        message = await esource.park_upload(ids["document_id"], ids["extraction_id"], split)
+        log.info("%s holds several visits; waiting for the split to be confirmed", filename)
+        return {"job_id": job_id, "filename": filename, "mode": "vision", "page_count": count,
+                "status": "SPLIT", "split": {"document_id": ids["document_id"],
+                                             "message": message,
+                                             "visits": len(result.get("segments") or [])},
+                **ids}
+    if decision == "single":
+        segment = result["segments"][0]
+        only = splits.single_pages(result)
+        seed = {"header_rows": splitter.header_seed(result, segment), "header_usage": {},
+                "edc_names": segment["edc_names"]}
+        await esource.mark_single(ids["document_id"], only, segment)
+
+    try:
+        images = await render.page_images(contents, MAX_PAGES, only=only)
+    except render.RenderError as exc:
+        await esource.abandon_upload(ids["extraction_id"], str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     meta = {
         "job_id": job_id,
         "filename": filename,
@@ -858,6 +911,7 @@ async def _create_vision_job(username: str, filename: str, contents: bytes,
         "parser": "vision",
         "pages": len(images),
         "owner": username,
+        **seed,
     }
     await store.put_parse(job_id, {
         "markdown": "",
@@ -865,14 +919,12 @@ async def _create_vision_job(username: str, filename: str, contents: bytes,
         "items": [],
         "images": images,
     })
-    ids = await esource.register_upload(username, filename, contents, len(images), job_id,
-                                        client_ip=_client_ip(request))
     meta.update(ids)
     await store.put_job(job_id, meta)
     log.info("rendered %s page(s) of %s for %s in %.1fs", len(images), filename,
              job_id, time.monotonic() - started)
     return {"job_id": job_id, "filename": filename, "mode": "vision",
-            "page_count": len(images), "status": "COMPLETED", **ids}
+            "page_count": count, "status": "COMPLETED", **ids}
 
 
 def _vision_status(meta: dict[str, Any]) -> dict[str, Any]:
@@ -1273,16 +1325,21 @@ async def load_visit(job_id: str, request: VisitRequest, http_request: Request) 
     """Step two: the CRFs the EDC holds for the confirmed visit."""
     username = await _current_user(http_request)
     meta = await _owned_job(job_id, username)
+    # The visit as printed first, then the short name the EDC may know it by.
+    names = splitter.edc_names(request.visit_name) + [
+        n for n in meta.get("edc_names") or []
+        if splitter.visit_key(n) == splitter.visit_key(request.visit_name)]
+    try:
+        visit, visit_name = await edc.find_visit(request.protocol_no, request.screening_no,
+                                                 names or [request.visit_name])
+    except edc.EdcUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    request.visit_name = visit_name
     problem = await esource.check_relink(job_id, {
         "protocol_no": request.protocol_no, "screening_no": request.screening_no,
         "visit_name": cronos.format_visit_name(request.visit_name)})
     if problem:
         raise HTTPException(status_code=409, detail=problem)
-    try:
-        visit = await edc.get_visit(request.protocol_no, request.screening_no,
-                                    request.visit_name)
-    except edc.EdcUnavailable as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     definition = visit_forms.build_definition(visit, cronos.local_forms())
     meta["visit_definition"] = definition

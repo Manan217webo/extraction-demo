@@ -900,3 +900,46 @@ def missing_forms(titles: Optional[list[dict[str, Any]]],
             continue
         out.append({"title": item.get("title"), "page": item.get("page")})
     return out
+
+
+# --------------------------------------------------------------------------- page routing
+
+
+def section_pages(sections: list[dict[str, Any]], titles: Optional[list[dict[str, Any]]],
+                  pages: list[int]) -> dict[str, list[int]]:
+    """Which pages each CRF is printed on, from the form titles found on the scan.
+
+    A form runs from the page its title is on to the page the next form starts on
+    (inclusive: two forms often share a page). A CRF whose title wasn't found is
+    given every page — sending too many pages costs a little; sending too few
+    would lose values.
+    """
+    ordered = sorted({p for p in pages})
+    if not ordered:
+        return {}
+    starts: list[tuple[int, str]] = []
+    for item in titles or []:
+        title = _norm(item.get("title") or "")
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            continue
+        if title and page in ordered:
+            starts.append((page, title))
+    starts.sort(key=lambda s: s[0])
+    out: dict[str, list[int]] = {}
+    for section in sections:
+        name = _norm(section.get("name") or "")
+        hits = [i for i, (_, title) in enumerate(starts)
+                if name and _similar(title, name) >= FORM_TITLE_MATCH]
+        if not hits:
+            out[section["section_id"]] = list(ordered)
+            continue
+        mine: set[int] = set()
+        for i in hits:
+            first = starts[i][0]
+            later = [p for p, _ in starts[i + 1:] if p > first]
+            last = later[0] if later else ordered[-1]
+            mine.update(p for p in ordered if first <= p <= last)
+        out[section["section_id"]] = sorted(mine)
+    return out

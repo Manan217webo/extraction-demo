@@ -17,6 +17,8 @@
     { id: "ready", label: "Ready", icon: "sparkle" },
     { id: "in_review", label: "In review", icon: "pen" },
     { id: "needs_input", label: "Needs input", icon: "alert-circle" },
+    // Files holding several visits, waiting for someone to confirm the split.
+    { id: "split_review", label: "Choose visits", icon: "layers" },
     { id: "processing", label: "Processing", icon: "loader" },
     { id: "submitted", label: "Submitted", icon: "check-seal" },
     { id: "failed", label: "Failed", icon: "x-circle" },
@@ -70,7 +72,34 @@
   }
 
   const docHref = (doc) =>
-    doc.status === "processing" || doc.status === "failed" ? `#/doc/${encodeURIComponent(doc.id)}/history` : `#/review/${encodeURIComponent(doc.id)}`;
+    doc.kind === "parent" && doc.status !== "processing"
+      ? `#/split/${encodeURIComponent(doc.id)}`
+      : doc.status === "processing" || doc.status === "failed" ? `#/doc/${encodeURIComponent(doc.id)}/history` : `#/review/${encodeURIComponent(doc.id)}`;
+
+  /* "Visit 3" for "Visit 3 On Treatment Visits: Week 2 (Day 15 ±2)"; the full
+     printed name stays in the cell's tooltip. */
+  function shortVisit(doc) {
+    const text = String(doc.visit_label || doc.visit_name || "").trim();
+    const numbered = /^visit\s*(?:no\.?\s*)?(\d{1,3})\b/i.exec(text);
+    if (numbered) return `Visit ${Number(numbered[1])}`;
+    return text.length > 28 ? `${text.slice(0, 26)}…` : text;
+  }
+
+  /* "8 visits · 3 ready · 1 submitted" for a file split into visits. */
+  function visitsSummary(doc) {
+    const c = doc.children || {};
+    const total = Object.values(c).reduce((a, b) => a + b, 0);
+    if (!total) return doc.status === "split_review" ? "Choose which visits to read" : "Not split yet";
+    return [
+      WH.fmt.plural(total, "visit"),
+      c.processing && `${c.processing} reading`,
+      c.ready && `${c.ready} ready`,
+      c.needs_input && `${c.needs_input} need input`,
+      c.in_review && `${c.in_review} in review`,
+      c.submitted && `${c.submitted} submitted`,
+      c.failed && `${c.failed} failed`,
+    ].filter(Boolean).join(" · ");
+  }
 
   function mount(root, ctx) {
     let f = readFilters(ctx.query);
@@ -155,7 +184,7 @@
 
     function tabItems() {
       const all = TABS.slice(1).filter((t) => t.id !== "archived")
-        .reduce((sum, t) => sum + (Number(counts[t.id]) || 0), 0);
+        .reduce((sum, t) => sum + (Number(counts[t.id]) || 0), 0) + (Number(counts.split) || 0);
       return TABS.map((t) => ({ ...t, count: t.id === "all" ? (Object.keys(counts).length ? all : null) : counts[t.id] != null ? counts[t.id] : null }));
     }
 
@@ -377,6 +406,7 @@
         ready: ["You're all caught up", "Nothing is waiting for review. New reads land here as soon as a batch finishes them."],
         in_review: ["No reviews in progress", "Documents you or a colleague have opened but not submitted appear here."],
         needs_input: ["Nothing needs your input", "When the header or visit can't be determined, the document waits here for you."],
+        split_review: ["No files waiting to be split", "When a file holds several visits, it waits here until someone checks which pages belong to which visit."],
         processing: ["Nothing is being read right now", "Start a scan from Sources to read new documents."],
         submitted: ["Nothing submitted yet", "Signed submissions to the EDC appear here."],
         archived: ["Nothing archived", "Records taken off the work list — for example a copy pushed to the wrong site — are kept here."],
@@ -482,11 +512,26 @@
         }, ui.icon("archive", { size: 12 }), `Archived by ${doc.archived.by || "—"}: ${doc.archived.reason || ""}`),
         stage
           ? h("span", { class: "wh-doc-sub wh-doc-stage" }, ui.icon("loader", { size: 12, className: "wh-spin" }), stage)
-          : folder && h("span", { class: "wh-doc-sub", title: doc.path }, ui.icon("folder", { size: 12 }), folder),
+          : doc.kind === "parent"
+            ? h("span", { class: "wh-doc-sub" }, ui.icon("layers", { size: 12 }), visitsSummary(doc))
+            : doc.kind === "child" && doc.parent_id
+              ? h("a", {
+                  class: "wh-doc-sub",
+                  href: `#/split/${encodeURIComponent(doc.parent_id)}`,
+                  tabindex: "-1",
+                  title: "All visits in the file this visit came from",
+                  onClick: (event) => event.stopPropagation(),
+                }, ui.icon("layers", { size: 12 }), doc.source_pages && doc.source_pages.length
+                  ? `From a multi-visit file · ${WH.visitStrip ? `pages ${WH.visitStrip.ranges(doc.source_pages)}` : ""}`
+                  : "From a multi-visit file")
+              : folder && h("span", { class: "wh-doc-sub", title: doc.path }, ui.icon("folder", { size: 12 }), folder),
         // Shown only when the Protocol column is dropped on narrow screens.
         doc.protocol_no && h("span", { class: "wh-doc-narrow" }, `Protocol ${doc.protocol_no}`)),
       h("td", { class: "wh-mono-num wh-col-subject" }, doc.screening_no || h("span", { class: "wh-muted" }, "—")),
-      h("td", { class: "wh-col-visit" }, doc.visit_name || h("span", { class: "wh-muted" }, "—")),
+      h("td", { class: "wh-col-visit", title: doc.visit_label || null },
+        doc.kind === "parent"
+          ? h("span", { class: "wh-muted" }, WH.fmt.plural(Object.values(doc.children || {}).reduce((a, b) => a + b, 0), "visit"))
+          : shortVisit(doc) || h("span", { class: "wh-muted" }, "—")),
       h("td", { class: "wh-mono-num wh-col-protocol" }, doc.protocol_no || h("span", { class: "wh-muted" }, "—")),
       h("td", { class: "wh-col-conf" }, ui.confidence(doc.confidence)),
       h("td", { class: "wh-col-flags" },
