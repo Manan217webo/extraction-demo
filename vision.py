@@ -222,7 +222,7 @@ def _needles(value: Any, tokens: bool = False) -> list[str]:
     collapsed = _alnum(text)
     add(collapsed)
 
-    # A date is held as "dd mmm yyyy" but written on the page in the order the
+    # A date is held as "dd-mmm-yyyy" but written on the page in the order the
     # boxes under it ask for — digits in comb boxes, sometimes ISO. Searching
     # for 30Aug2026 can never match a page reading 160226, so every ordering
     # the form might use is offered.

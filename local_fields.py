@@ -465,12 +465,12 @@ def _read_date(text: str) -> Optional[str]:
     if len(digits) >= 6:
         day, month, year = int(digits[:2]), int(digits[2:4]), int(digits[4:6])
         if 1 <= day <= 31 and 1 <= month <= 12:
-            return f"{day:02d} {_MONTHS[month - 1]} {2000 + year}"
+            return f"{day:02d}-{_MONTHS[month - 1]}-{2000 + year}"
     named = re.search(
         r"\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{2,4})\b", text or ""
     )
     if named:
-        return f"{named.group(1)} {named.group(2)} {named.group(3)}"
+        return f"{int(named.group(1)):02d}-{named.group(2)}-{named.group(3)}"
     return None
 
 

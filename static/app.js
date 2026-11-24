@@ -280,7 +280,15 @@ function formatDate(text) {
   if (!parts || parts.mo < 1 || parts.mo > 12 || parts.d < 1 || parts.d > 31) {
     return text == null ? "" : String(text);
   }
-  return `${String(parts.d).padStart(2, "0")} ${MONTHS_EN[parts.mo - 1]} ${parts.y}`;
+  return `${String(parts.d).padStart(2, "0")}-${MONTHS_EN[parts.mo - 1]}-${parts.y}`;
+}
+
+/* A date rewritten only to add hyphens ("15 Jan 2025" → "15-Jan-2025") is the
+   same value. Tabbing through the field must not record an edit. */
+function sameDateText(left, right) {
+  const a = parseDateParts(left);
+  const b = parseDateParts(right);
+  return Boolean(a && b && a.y === b.y && a.mo === b.mo && a.d === b.d);
 }
 
 /* ----------------------------------------------------------------- credits */
@@ -1949,7 +1957,7 @@ function fieldControl(field) {
     input.type = "text";
     input.autocomplete = "off";
     input.spellcheck = false;
-    input.placeholder = "dd mmm yyyy";
+    input.placeholder = "dd-mmm-yyyy";
     input.value = value ? formatDate(value) : "";
     return {
       node: input,
@@ -2121,9 +2129,10 @@ function renderField(field, { compact = false } = {}) {
   const commit = () => {
     if (state.readOnly) return;
     const next = control.read();
-    if (String(next === null ? "" : next) === String(field.value === null ? "" : field.value)) {
-      return;
-    }
+    const previousText = field.value === null || field.value === undefined ? "" : String(field.value);
+    const nextText = next === null || next === undefined ? "" : String(next);
+    if (previousText === nextText) return;
+    if (field.type === "date" && sameDateText(previousText, nextText)) return;
     const previous = field.value;
     field.value = next;
     field.status = field.status === "empty" || field.value === null ? "manual" : "edited";

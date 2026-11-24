@@ -22,7 +22,7 @@ LOW_CONFIDENCE = 0.6
 _TICKED = re.compile(r"\[\s*(?:x|X|yes)\s*\]")
 _UNTICKED = re.compile(r"\[\s*(?:|no)\s*\]")
 
-# Canonical display: "30 Aug 2026". English month names, so a Windows machine
+# Canonical display: "30-Aug-2026". English month names, so a Windows machine
 # whose locale is not English still writes and reads the same string.
 _MONTHS_EN = (
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -87,11 +87,11 @@ def parse_date(text: str) -> Optional[datetime]:
 
 
 def format_date(value: Any) -> str:
-    """`dd mmm yyyy`, English months, zero-padded day — e.g. 30 Aug 2026."""
+    """`dd-mmm-yyyy`, English months, zero-padded day — e.g. 30-Aug-2026."""
     parsed = value if isinstance(value, datetime) else parse_date(str(value or ""))
     if parsed is None:
         return "" if value is None else str(value)
-    return f"{parsed.day:02d} {_MONTHS_EN[parsed.month - 1]} {parsed.year}"
+    return f"{parsed.day:02d}-{_MONTHS_EN[parsed.month - 1]}-{parsed.year}"
 
 
 # --------------------------------------------------------------------------- coercion
