@@ -3687,6 +3687,9 @@ els.loginForm.addEventListener("submit", async (event) => {
         password: els.loginPassword.value,
       }),
     });
+    // The address still holds the last screen. Replace it before the shell
+    // starts the router, so a sign-in always opens the dashboard.
+    if (location.hash !== "#/") location.replace("#/");
     await afterSignIn(data);
   } catch (error) {
     // 423: the account is locked; the detail says until when.
