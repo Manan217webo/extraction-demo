@@ -312,6 +312,51 @@ def test_reviewer_clearing_a_value_is_sent_but_an_unread_blank_is_not():
     assert {f["field_id"]: f["value"] for f in body["crfs"][0]["fields"]} == {101: ""}
 
 
+def test_serial_number_stays_a_data_column():
+    """S No. is filled in by the site. It is not the row's name."""
+    import visit_forms
+    crf = {"crfId": 12, "crfName": "Medical history", "fields": [
+        {"field_id": 1, "field_name": "Details", "control_type": "table", "field_seq": 7},
+        {"field_id": 11, "field_name": "S No.", "control_type": "text", "field_col": 1,
+         "table_row_number": 1, "field_seq": 7, "nParentSectionDtlID": 1, "value": ""},
+        {"field_id": 12, "field_name": "Medical condition/ Surgery", "control_type": "text",
+         "field_col": 2, "table_row_number": 1, "field_seq": 7, "nParentSectionDtlID": 1,
+         "value": ""},
+        {"field_id": 13, "field_name": "S No.", "control_type": "text", "field_col": 1,
+         "table_row_number": 2, "field_seq": 7, "nParentSectionDtlID": 1, "value": ""},
+        {"field_id": 14, "field_name": "Medical condition/ Surgery", "control_type": "text",
+         "field_col": 2, "table_row_number": 2, "field_seq": 7, "nParentSectionDtlID": 1,
+         "value": ""},
+    ]}
+    built = visit_forms.build_structured_crf(crf)
+    group = built["section"]["group"]
+    serial = next(field for field in group["fields"] if field["label"] == "S No.")
+    assert serial["type"] == "text" and not serial.get("row_name")
+    assert group["row_names"] == ["", ""]
+    assert len(built["edc"]["rows"]) == 2
+    assert any(key.endswith("|S_NO") for key in built["edc"]["address"])
+
+
+def test_label_column_still_names_the_row():
+    import visit_forms
+    crf = {"crfId": 3, "crfName": "Vitals", "fields": [
+        {"field_id": 1, "field_name": "Parameter", "control_type": "table", "field_seq": 4},
+        {"field_id": 21, "field_name": "Pulse rate", "control_type": "label", "field_col": 1,
+         "table_row_number": 1, "field_seq": 4, "nParentSectionDtlID": 1},
+        {"field_id": 22, "field_name": "Result", "control_type": "number", "field_col": 2,
+         "table_row_number": 1, "field_seq": 4, "nParentSectionDtlID": 1},
+        {"field_id": 23, "field_name": "Temperature", "control_type": "label", "field_col": 1,
+         "table_row_number": 2, "field_seq": 4, "nParentSectionDtlID": 1},
+        {"field_id": 24, "field_name": "Result", "control_type": "number", "field_col": 2,
+         "table_row_number": 2, "field_seq": 4, "nParentSectionDtlID": 1},
+    ]}
+    group = visit_forms.build_structured_crf(crf)["section"]["group"]
+    naming = next(field for field in group["fields"] if field.get("row_name"))
+    assert naming["type"] == "label"
+    assert group["row_names"] == ["Pulse rate", "Temperature"]
+    assert any(field["label"] == "Result" and not field.get("row_name") for field in group["fields"])
+
+
 def test_label_controls_are_read_only_and_never_sent():
     import visit_forms
     crf = {"crfId": 9, "crfName": "Vitals", "fields": [

@@ -381,10 +381,22 @@ def _structured_group(container: dict[str, Any], cells: list[dict[str, Any]],
         definitions.append(built)
         ids[column] = field_id
 
+    # A label column identifies the row ("Pulse rate"). A data column such as
+    # S No. carries the same field name on every row — that name is the header,
+    # and the handwritten number is the cell, not the row title.
+    first_labels_rows = False
+    if rows and columns:
+        first_cell = by_cell.get((rows[0], columns[0])) or {}
+        first_labels_rows = str(first_cell.get("control_type") or "").lower() == "label"
+
     labels: list[str] = []
     for number, row in enumerate(rows, start=1):
-        first = by_cell.get((row, columns[0])) if columns else None
-        labels.append((first or {}).get("field_name") or f"Row {row}")
+        if first_labels_rows:
+            first = by_cell.get((row, columns[0])) if columns else None
+            labels.append((first or {}).get("field_name") or f"Row {row}")
+        else:
+            # One slot per printed row, so the visit still reports its row count.
+            labels.append("")
         for column in columns:
             cell = by_cell.get((row, column))
             if cell is None or column not in ids:

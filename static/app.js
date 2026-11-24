@@ -2742,14 +2742,19 @@ function renderGroupTable(group, columns) {
   const table = document.createElement("table");
   table.className = "crf-table";
 
-  // The EDC has no slot for a row's own name, so the definition supplies one.
-  // It names the row rather than being a column of its own — showing it twice,
-  // once as "Parameter 1" and again as "Pulse rate", says nothing extra.
-  const naming =
-    columns.find((column) => column.row_name) ||
-    columns.find((column) => column.edc_index === null) ||
-    null;
+  // A row_name column is printed text that identifies the row ("Pulse rate"),
+  // not a value the site entered. Structured entry columns also have no
+  // edc_index — they save by field id — so a missing index is not a row name.
+  // Treating it as one hid S No. and showed the header in its place.
+  const naming = columns.find((column) => column.row_name) || null;
   if (naming) columns = columns.filter((column) => column !== naming);
+  // "S No." repeated on every row is that column's header, not which row it is.
+  const headers = new Set(
+    [naming && naming.label, ...columns.map((column) => column.label)].filter(Boolean)
+  );
+  const identities = (group.row_names || []).every((name) => !name || headers.has(name))
+    ? []
+    : group.row_names || [];
 
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -2779,9 +2784,7 @@ function renderGroupTable(group, columns) {
     heading.className = "row-head";
     heading.scope = "row";
     // The EDC now names each row itself; fall back only when it does not.
-    const printed = (group.row_names || [])[
-      (instance.source_instance || instance.instance) - 1
-    ];
+    const printed = identities[(instance.source_instance || instance.instance) - 1];
     const named = naming ? byId.get(naming.field_id) : null;
     heading.textContent =
       printed || (named && named.value) || `${group.row_label} ${instance.instance}`;
