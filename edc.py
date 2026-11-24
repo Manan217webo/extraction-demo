@@ -192,9 +192,10 @@ def configured() -> bool:
     return True
 
 
-# Set per request when a person signed in through Cronos: their own access token,
-# fetched (and refreshed) only when a call is actually made. Unset — background
-# work, local accounts — the shared EDC_API_KEY is used.
+# The Cronos token of the person this call is for. A request sets it from their
+# session; a background read sets it from the session of whoever queued the
+# work. Unset — a local account, or nobody signed in — the shared EDC_API_KEY
+# is used.
 _user_token: contextvars.ContextVar[Optional[Callable[[], Awaitable[str]]]] = \
     contextvars.ContextVar("edc_user_token", default=None)
 

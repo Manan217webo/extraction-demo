@@ -288,6 +288,7 @@ async def _run(extraction_id: str, token: str) -> None:
         # What the split already read for this run: a visit cut from a larger
         # file arrives with its header, so the header is never read twice.
         seed = dict((extraction.snapshot or {}).get("meta") or {})
+    await _bind_edc_user(owner)
     primary, secondary = fields.read_models(True)
     models = {"primary": primary, "secondary": secondary, "preferred": fields.preferred_read()}
 
@@ -361,6 +362,31 @@ async def _run(extraction_id: str, token: str) -> None:
                   models=models, header=triple)
 
 
+async def _bind_edc_user(owner: str) -> None:
+    """Use the Cronos token of the person who queued this read.
+
+    The worker has no browser request. Their token was saved with their session
+    when they signed in, and is still there for as long as they are.
+    """
+    import auth
+    import cronos_auth
+    import edc
+    import store
+
+    edc.use_token(None)
+    if not cronos_auth.edc_as_user():
+        return
+    user = await auth.get_user(owner)
+    if user is None or not auth.is_cronos(user):
+        return
+    redis = store.get_redis()
+    session_token = await cronos_auth.session_for_user(redis, owner)
+    if not session_token:
+        return
+    ttl = auth.max_seconds()
+    edc.use_token(lambda: cronos_auth.access_token(redis, session_token, ttl))
+
+
 async def process(extraction_id: str, token: str) -> None:
     import edc
     import fields
@@ -393,6 +419,7 @@ async def process(extraction_id: str, token: str) -> None:
         await _finish(extraction_id, "failed", token, error=str(detail), retry=True)
     finally:
         beat.cancel()
+        edc.use_token(None)
 
 
 # --------------------------------------------------------------------------- loop

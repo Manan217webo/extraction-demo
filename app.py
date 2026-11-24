@@ -566,6 +566,11 @@ class _AuthMiddleware(BaseHTTPMiddleware):
             request.state.user = user.username
             request.state.role = user.role
             request.state.expires_in = info["expires_in"]
+            if auth.is_cronos(user):
+                # So a background read, which has no request, can still find them.
+                await cronos_auth.remember_user(
+                    store.get_redis(), token, user.username,
+                    info.get("expires_in") or auth.max_seconds())
             if auth.is_cronos(user) and cronos_auth.edc_as_user():
                 # EDC calls made while serving this person carry their own Cronos token.
                 edc.use_token(lambda: cronos_auth.access_token(

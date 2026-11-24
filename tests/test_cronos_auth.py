@@ -265,6 +265,37 @@ def test_a_spent_refresh_token_ends_the_session(cronos):
     assert exc.value.status == 401
 
 
+def test_a_signed_in_user_is_used_for_background_reads(cronos):
+    """The worker has no browser request. A person signed in through Cronos
+    still has their token, and a background read of their visit uses it."""
+    _, redis = cronos
+    c = client()
+    sign_in(c)
+    token = c.cookies.get("webo_session")
+
+    async def go():
+        import cronos_auth
+        import edc
+        import pipeline
+        assert await cronos_auth.session_for_user(redis, "jsmith") == token
+        await pipeline._bind_edc_user("jsmith")
+        try:
+            return await edc._headers()
+        finally:
+            edc.use_token(None)
+
+    headers = asyncio.run(go())
+    assert headers["Authorization"].startswith("Bearer at-42-")
+
+    c.post("/api/logout")
+
+    async def gone():
+        import cronos_auth
+        return await cronos_auth.session_for_user(redis, "jsmith")
+
+    assert asyncio.run(gone()) is None
+
+
 def test_edc_calls_carry_the_person_token(cronos):
     import edc
 

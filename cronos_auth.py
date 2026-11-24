@@ -266,8 +266,50 @@ def _key(session_token: str) -> str:
     return f"cronos:{session_token}"
 
 
+def _user_key(username: str) -> str:
+    return f"cronos:user:{username}"
+
+
+def _owner_key(session_token: str) -> str:
+    return f"cronos:owner:{session_token}"
+
+
+def _text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    return str(value)
+
+
+async def _session_username(redis, session_token: str) -> Optional[str]:
+    raw = _text(await redis.get(f"session:{session_token}"))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw
+    return data.get("u") if isinstance(data, dict) else None
+
+
+async def remember_user(redis, session_token: str, username: str, ttl: int) -> None:
+    """Point this person's name at the session that holds their Cronos token.
+
+    Background reads have no browser request, so this is how they find the
+    token of someone who is signed in.
+    """
+    ttl = max(1, int(ttl))
+    await redis.set(_owner_key(session_token), username, ex=ttl)
+    await redis.set(_user_key(username), session_token, ex=ttl)
+
+
 async def save_grant(redis, session_token: str, grant: Grant, ttl: int) -> None:
-    await redis.set(_key(session_token), json.dumps(asdict(grant)), ex=max(1, int(ttl)))
+    ttl = max(1, int(ttl))
+    await redis.set(_key(session_token), json.dumps(asdict(grant)), ex=ttl)
+    username = await _session_username(redis, session_token)
+    if username:
+        await remember_user(redis, session_token, username, ttl)
 
 
 async def load_grant(redis, session_token: Optional[str]) -> Optional[Grant]:
@@ -283,8 +325,25 @@ async def load_grant(redis, session_token: Optional[str]) -> Optional[Grant]:
 
 
 async def drop_grant(redis, session_token: Optional[str]) -> None:
-    if session_token:
-        await redis.delete(_key(session_token))
+    if not session_token:
+        return
+    owner = _text(await redis.get(_owner_key(session_token)))
+    await redis.delete(_key(session_token))
+    await redis.delete(_owner_key(session_token))
+    if owner and _text(await redis.get(_user_key(owner))) == session_token:
+        await redis.delete(_user_key(owner))
+
+
+async def session_for_user(redis, username: str) -> Optional[str]:
+    """The live session of a person signed in through Cronos, if they still are."""
+    session_token = _text(await redis.get(_user_key(username)))
+    if not session_token:
+        return None
+    if await redis.get(f"session:{session_token}") is None:
+        return None
+    if await load_grant(redis, session_token) is None:
+        return None
+    return session_token
 
 
 async def access_token(redis, session_token: Optional[str], ttl: int) -> str:
