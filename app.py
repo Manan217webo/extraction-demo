@@ -53,6 +53,7 @@ import fields
 import local_fields
 import mapping
 import render
+import sources
 import splits
 import splitter
 import store
@@ -74,7 +75,8 @@ log = logging.getLogger("extraction")
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 # A whole scanned case report form (80+ pages at 300 dpi) runs well past 50 MB.
-MAX_BYTES = max(1, int(os.getenv("MAX_UPLOAD_MB") or 200)) * 1024 * 1024
+# The upload limits (MAX_UPLOAD_MB, MIN_UPLOAD_KB) live in sources.py so uploads
+# and file-server reads agree; they are read from there at each use.
 TERMINAL_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
 HEADER_PAGE_LIMIT = max(1, int(os.getenv("HEADER_PAGE_LIMIT") or 3))
 MAX_CONCURRENT_READS = max(1, int(os.getenv("MAX_CONCURRENT_READS") or 3))
@@ -769,9 +771,10 @@ async def session() -> dict[str, Any]:
         },
         "features": {"auth": "cronos" if cronos_auth.enabled() else "local",
                      "duties_enforced": cronos_auth.enforce_duties(),
-                     "sources": bool(__import__("sources").load()),
+                     "sources": bool(sources.load()),
                      "audit_delivery": "live" if edc_audit.endpoint() else "held"},
-        "max_file_mb": MAX_BYTES // (1024 * 1024),
+        "max_file_mb": sources.MAX_FILE_BYTES // (1024 * 1024),
+        "min_file_kb": sources.MIN_FILE_BYTES // 1024,
         "mapping": {
             "ready": fields.configured(),
             "model": fields.model_name() if fields.configured() else None,
@@ -806,10 +809,16 @@ async def create_extraction(
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=400, detail="That file appears to be empty.")
-    if len(contents) > MAX_BYTES:
+    if len(contents) > sources.MAX_FILE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"PDFs must be {MAX_BYTES // (1024 * 1024)} MB or smaller.",
+            detail=f"PDFs must be {sources.MAX_FILE_BYTES // (1024 * 1024)} MB or smaller.",
+        )
+    if len(contents) < sources.MIN_FILE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDFs must be at least {sources.MIN_FILE_BYTES // 1024} KB. This one is "
+                   f"{max(1, len(contents) // 1024)} KB — check it isn't blank or cut short.",
         )
 
     if _vision():

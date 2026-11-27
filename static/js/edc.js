@@ -5,8 +5,9 @@
    - every change of value carries a reason (reason-for-change popover);
    - the work is kept as server drafts (autosave, Cmd/Ctrl-S, 409 handling),
      mirrored on this device while offline;
-   - submitting goes through a pre-flight against the live EDC and an
-     e-signature (21 CFR Part 11) instead of a one-click save;
+   - submitting goes through a pre-flight against the live EDC and a
+     confirmation (an e-signature under 21 CFR Part 11 only when the server
+     has REQUIRE_ESIGN on) instead of a one-click save;
    - a flag rail walks the reviewer through what needs a look.
 
    Built on window.ReviewCore (static/app.js). Classic script; publishes
@@ -122,7 +123,8 @@
   ];
   const SHORT_MEANING = { REVIEWED_ACCURATE: "Reviewed — accurate", AUTHOR: "Author" };
 
-  const meta = { reasons: FALLBACK_REASONS, meanings: FALLBACK_MEANINGS, promise: null };
+  // esign: whether submitting needs a password e-signature (server REQUIRE_ESIGN).
+  const meta = { reasons: FALLBACK_REASONS, meanings: FALLBACK_MEANINGS, esign: false, promise: null };
 
   function loadMeta(force) {
     if (meta.promise && !force) return meta.promise;
@@ -130,6 +132,7 @@
       .then((data) => {
         if (Array.isArray(data.reasons) && data.reasons.length) meta.reasons = data.reasons;
         if (Array.isArray(data.meanings) && data.meanings.length) meta.meanings = data.meanings;
+        meta.esign = Boolean(data.esign_required);
         if (data.user && data.user.username) {
           state.user = { ...(state.user || {}), ...data.user };
         }
@@ -164,6 +167,20 @@
   }
 
   /* -------------------------------------------------------------- edits */
+
+  /* "Signed by …" for an e-signature, "Submitted by …" for a plain submit. */
+  function attribution(sig, fallbackName) {
+    const who = sig.full_name || fallbackName || "—";
+    return sig.esigned === false
+      ? `Verified and submitted by ${who}`
+      : `Signed by ${who} · ${meaningShort(sig.meaning)}`;
+  }
+
+  /* The words on the button that moves from the pre-flight to the last step. */
+  function continueLabel(n) {
+    if (meta.esign) return n ? "Continue to sign" : "Mark as reviewed";
+    return n ? "Continue to submit" : "Mark as reviewed";
+  }
 
   function lastReasonKey() {
     return `wh.lastReason:${state.username || ""}`;
@@ -829,7 +846,7 @@
     icon.innerHTML = C.STATUS_ICONS.success; // fixed markup, no data
     signatureLine.appendChild(icon);
     const text = sig
-      ? `Signed by ${sig.full_name || "—"} · ${meaningShort(sig.meaning)} · ${utcStamp(sig.signed_at)}`
+      ? `${attribution(sig)} · ${utcStamp(sig.signed_at)}`
       : `Submitted by ${sub.submitted_by || "—"} · ${utcStamp(sub.submitted_at)}`;
     signatureLine.appendChild(el("span", "", text));
   }
@@ -1093,7 +1110,7 @@
     live.setAttribute("role", "status");
     layer.body.append(live, preflightSkeleton());
     const cancel = button("Cancel", "btn btn-quiet", () => layer.close());
-    const cont = button("Continue to sign", "btn btn-primary");
+    const cont = button(continueLabel(1), "btn btn-primary");
     cont.disabled = true;
     cont.classList.add("is-loading");
     cont.textContent = "Checking the EDC…";
@@ -1116,7 +1133,7 @@
         action: { label: "Try again", onClick: () => runPreflight() },
       }));
       cont.classList.remove("is-loading");
-      cont.textContent = "Continue to sign";
+      cont.textContent = continueLabel(1);
       return;
     }
     if (layer.closed) return;
@@ -1207,7 +1224,7 @@
     if (pf.warnings.length > 2) {
       const node = C.statusNode({
         kind: "warn",
-        title: `${pf.warnings.length} things to know before you sign`,
+        title: `${pf.warnings.length} things to know before you ${meta.esign ? "sign" : "submit"}`,
         list: pf.warnings.map((warning) => ({ label: String(warning) })),
       });
       const items = node.querySelector(".status-list");
@@ -1227,8 +1244,8 @@
       empty.append(icon,
         el("h3", "", "Everything already matches the EDC — nothing to send"),
         el("p", "rv-muted", m
-          ? `All ${plural(m, "value")} on this form are already in the EDC. You can sign the review as done.`
-          : "There are no values to send. You can sign the review as done."));
+          ? `All ${plural(m, "value")} on this form are already in the EDC. You can mark the review as done.`
+          : "There are no values to send. You can mark the review as done."));
       layer.body.appendChild(empty);
     } else {
       const section = el("section", "rv-pf-send");
@@ -1302,7 +1319,7 @@
     if (note) note.textContent = n ? `${plural(n, "change")} · ${m} already match` : "";
     cont.classList.remove("is-loading");
     cont.disabled = pf.blocked.length > 0;
-    cont.textContent = n ? "Continue to sign" : "Mark as reviewed";
+    cont.textContent = continueLabel(n);
     const fresh = cont.cloneNode(true); // drop any earlier handler
     cont.replaceWith(fresh);
     fresh.addEventListener("click", () => openSign(n ? "send" : "review"));
@@ -1315,18 +1332,25 @@
     if (!preflight) return;
     const n = preflight.changes.length;
     const user = state.user || { username: state.username, full_name: state.username };
+    const esign = meta.esign;
     const modal = openLayer({
       kind: "modal",
-      title: mode === "send" ? "Sign and submit" : "Sign the review",
+      title: esign
+        ? (mode === "send" ? "Sign and submit" : "Sign the review")
+        : (mode === "send" ? "Submit to the EDC" : "Mark as reviewed"),
       className: "rv-sign",
     });
     const form = el("form", "rv-sign-form");
     form.noValidate = true;
     form.autocomplete = "off";
 
-    form.appendChild(el("p", "rv-sign-statement",
-      `I, ${user.full_name || user.username} (${user.username}), sign this record.`));
+    form.appendChild(el("p", "rv-sign-statement", esign
+      ? `I, ${user.full_name || user.username} (${user.username}), sign this record.`
+      : `I, ${user.full_name || user.username} (${user.username}), confirm these values were ` +
+        "verified against the source document."));
 
+    // Without an e-signature there is nothing to choose or type: the person
+    // signed in is recorded as having verified and submitted the record.
     const fieldset = el("fieldset", "rv-meanings");
     fieldset.appendChild(el("legend", "", "Meaning of this signature"));
     meta.meanings.forEach((meaning, i) => {
@@ -1341,7 +1365,7 @@
       label.append(radio, text);
       fieldset.appendChild(label);
     });
-    form.appendChild(fieldset);
+    if (esign) form.appendChild(fieldset);
 
     const pwLabel = el("label", "rv-pw");
     pwLabel.appendChild(el("span", "", "Password"));
@@ -1353,28 +1377,33 @@
     const caps = el("p", "rv-caps hidden", "Caps Lock is on");
     caps.setAttribute("role", "status");
     pwLabel.appendChild(caps);
-    form.appendChild(pwLabel);
+    if (esign) form.appendChild(pwLabel);
 
     const error = el("p", "rv-sign-error hidden");
     error.setAttribute("role", "alert");
     form.appendChild(error);
 
-    form.appendChild(el("p", "rv-part11",
-      "This is an electronic signature under 21 CFR Part 11. It is the legally binding " +
-      "equivalent of your handwritten signature. Your name, the date and time (UTC) and the " +
-      "meaning above are permanently linked to this record and recorded in the audit trail."));
+    form.appendChild(el("p", "rv-part11", esign
+      ? "This is an electronic signature under 21 CFR Part 11. It is the legally binding " +
+        "equivalent of your handwritten signature. Your name, the date and time (UTC) and the " +
+        "meaning above are permanently linked to this record and recorded in the audit trail."
+      : "Your name and the date and time (UTC) are linked to this record and recorded in " +
+        "the audit trail."));
     modal.body.appendChild(form);
 
     const cancel = button("Cancel", "btn btn-quiet", () => modal.close());
-    const go = el("button", "btn btn-primary",
-      mode === "send" ? `Sign and submit ${plural(n, "change")}` : "Sign as reviewed");
+    const go = el("button", "btn btn-primary", esign
+      ? (mode === "send" ? `Sign and submit ${plural(n, "change")}` : "Sign as reviewed")
+      : (mode === "send" ? `Submit ${plural(n, "change")}` : "Mark as reviewed"));
     go.type = "button";
-    go.disabled = true;
+    go.disabled = esign;
     modal.foot.append(cancel, go);
     go.addEventListener("click", (event) => { event.preventDefault(); submit(); });
     form.addEventListener("submit", (event) => { event.preventDefault(); submit(); });
 
-    const sync = () => { go.disabled = !pw.value || !form.querySelector("input[name=rv-meaning]:checked"); };
+    const sync = () => {
+      go.disabled = esign && (!pw.value || !form.querySelector("input[name=rv-meaning]:checked"));
+    };
     pw.addEventListener("input", sync);
     fieldset.addEventListener("change", sync);
     const capsCheck = (event) => {
@@ -1383,13 +1412,15 @@
     pw.addEventListener("keydown", capsCheck);
     pw.addEventListener("keyup", capsCheck);
     pw.addEventListener("blur", () => caps.classList.add("hidden"));
-    setTimeout(() => pw.focus(), 40);
+    setTimeout(() => (esign ? pw : go).focus(), 40);
 
     let busy = false;
     async function submit() {
       if (busy || go.disabled) return;
-      const meaning = (form.querySelector("input[name=rv-meaning]:checked") || {}).value;
-      if (!meaning || !pw.value) return;
+      const meaning = esign
+        ? (form.querySelector("input[name=rv-meaning]:checked") || {}).value
+        : undefined;
+      if (esign && (!meaning || !pw.value)) return;
       busy = true;
       modal.dismissable = false;
       error.classList.add("hidden");
@@ -1399,14 +1430,14 @@
       go.classList.add("is-loading");
       try {
         const crops = mode === "send" ? await C.cutCrops((text) => { go.textContent = text; }) : {};
-        go.textContent = mode === "send" ? "Sending to the EDC…" : "Signing…";
+        go.textContent = mode === "send" ? "Sending to the EDC…" : esign ? "Signing…" : "Saving…";
         const res = await api(`/api/docs/${encodeURIComponent(state.docId)}/submit`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             payload: payloadForServer(),
             crops,
-            password: pw.value,
+            password: esign ? pw.value : undefined,
             meaning,
             diff_sha: preflight.diff_sha,
             edits: cleanEdits(),
@@ -1435,7 +1466,7 @@
           modal.close(); // the session ended; app.js shows sign-in
         } else {
           error.textContent = err.status === 502
-            ? "The EDC couldn't be reached. Your signature and draft are kept — try again in a moment."
+            ? `The EDC couldn't be reached. Your ${esign ? "signature and " : ""}draft ${esign ? "are" : "is"} kept — try again in a moment.`
             : err.status === 423
               ? err.message || "Your account is locked."
               : err.message;
@@ -1451,6 +1482,7 @@
       full_name: (state.user || {}).full_name || state.username,
       meaning,
       signed_at: new Date().toISOString(),
+      esigned: meta.esign,
     };
     state.signature = sig;
     state.submitted = { submitted_at: sig.signed_at, submitted_by: (state.user || {}).full_name || state.username };
@@ -1471,14 +1503,15 @@
     // The beat of "done": a check that draws itself, and the manifestation.
     modal.body.textContent = "";
     modal.foot.textContent = "";
-    modal.title.textContent = sent ? "Signed and submitted" : "Signed";
+    modal.title.textContent = meta.esign
+      ? (sent ? "Signed and submitted" : "Signed")
+      : (sent ? "Submitted to the EDC" : "Marked as reviewed");
     const done = el("div", "rv-done");
     done.innerHTML =
       '<svg viewBox="0 0 52 52" width="64" height="64" aria-hidden="true">' +
       '<circle class="rv-done-ring" cx="26" cy="26" r="23" fill="none" stroke="currentColor" stroke-width="3"/>' +
       '<path class="rv-done-tick" d="M15 27l7 7 15-16" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    done.appendChild(el("p", "rv-done-line",
-      `Signed by ${sig.full_name || "—"} · ${meaningShort(sig.meaning)} · ${utcStamp(sig.signed_at)}`));
+    done.appendChild(el("p", "rv-done-line", `${attribution(sig)} · ${utcStamp(sig.signed_at)}`));
     done.setAttribute("role", "status");
     modal.body.appendChild(done);
     modal.dismissable = true;
@@ -1548,7 +1581,7 @@
       submissions.forEach((s) => {
         const li = el("li", "rv-hist-item is-signed");
         const sig = s.signature || {};
-        li.appendChild(el("strong", "", `Signed by ${sig.full_name || s.submitted_by || "—"} · ${meaningShort(sig.meaning)}`));
+        li.appendChild(el("strong", "", attribution(sig, s.submitted_by)));
         const changes = Array.isArray(s.changes) ? s.changes.length : Number(s.changes) || 0;
         const skipped = Array.isArray(s.skipped) ? s.skipped.length : Number(s.skipped) || 0;
         li.appendChild(el("span", "rv-muted",

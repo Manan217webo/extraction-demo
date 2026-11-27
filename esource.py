@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -43,6 +44,18 @@ MEANINGS = [
     {"code": "AUTHOR", "label": "I am the author of these entries"},
 ]
 MEANING_LABELS = {m["code"]: m["label"] for m in MEANINGS}
+
+# Submitting to the EDC without an e-signature (agreed in the 26-Nov-2026 eSource
+# meeting). The person who verified and submitted is still recorded, with this
+# meaning, against a hash of exactly what was sent — only the password
+# re-entry and the choice of meaning are gone. REQUIRE_ESIGN=true restores the
+# 21 CFR Part 11 signature step.
+SUBMITTED = "SUBMITTED"
+SUBMITTED_LABEL = "Verified against the source document and submitted to the EDC"
+
+
+def esign_required() -> bool:
+    return (os.getenv("REQUIRE_ESIGN") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def canonical_sha(value: Any) -> str:
@@ -375,7 +388,8 @@ def signature_dict(signature: Optional[db.Signature]) -> Optional[dict[str, Any]
         return None
     return {"full_name": signature.full_name, "username": signature.username,
             "meaning": signature.meaning, "signed_at": documents.iso(signature.signed_at),
-            "record_sha256": signature.record_sha256}
+            "record_sha256": signature.record_sha256,
+            "esigned": signature.meaning != SUBMITTED_LABEL}
 
 
 def missing_form_warnings(payload: Optional[dict[str, Any]]) -> list[str]:

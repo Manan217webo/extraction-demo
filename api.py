@@ -187,7 +187,7 @@ async def _guard_write(session, document: db.Document, user: db.User, *,
 async def meta(request: Request) -> dict[str, Any]:
     user = await current(request)
     return {"reasons": esource.REASONS, "meanings": esource.MEANINGS,
-            "user": auth.user_dict(user)}
+            "esign_required": esource.esign_required(), "user": auth.user_dict(user)}
 
 
 # --------------------------------------------------------------------------- sources
@@ -1203,7 +1203,7 @@ async def preflight(document_id: str, body: PreflightRequest, request: Request) 
 class SubmitRequest(BaseModel):
     payload: dict[str, Any]
     crops: dict[str, dict[str, Any]] = {}
-    password: str
+    password: Optional[str] = None  # only when REQUIRE_ESIGN is on
     meaning: str = "REVIEWED_ACCURATE"
     diff_sha: Optional[str] = None
     edits: list[dict[str, Any]] = []
@@ -1215,28 +1215,33 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
 
     user = await writer(request)
     ip = client_ip(request)
-    if body.meaning not in esource.MEANING_LABELS:
+    esign = esource.esign_required()
+    if esign and body.meaning not in esource.MEANING_LABELS:
         raise HTTPException(422, "Choose what your signature means.")
-    # Re-authentication at the moment of signing (21 CFR 11.200). A wrong
-    # password counts towards the lockout but does not end the session.
+    if esign and not body.password:
+        raise HTTPException(422, "Enter your password to sign.")
     async with db.session() as session:
         document = await _document(session, document_id, user)
         await _guard_write(session, document, user)
-    # Checked fresh (no cache) before the signature, so a revoked delegation
-    # stops the signing rather than being noticed afterwards.
+    # Checked fresh (no cache) before submitting, so a revoked delegation
+    # stops the submit rather than being noticed afterwards.
     right = await require_duty(request, user, "submit", document, fresh=True)
-    try:
-        ok, grant = await auth.confirm_signature(user, body.password, client_ip=ip)
-    except auth.Locked as exc:
-        raise HTTPException(423, f"Your account is locked until "
-                                 f"{exc.until.strftime('%H:%M UTC')} after too many attempts.") from exc
-    if not ok:
-        raise HTTPException(403, "That password isn't right.")
-    if grant is not None:
-        # Signing re-proved the password to Cronos: keep the fresh tokens it issued.
-        import store
-        await cronos_auth.save_grant(store.get_redis(), _session_token(request), grant,
-                                     auth.max_seconds())
+    if esign:
+        # Re-authentication at the moment of signing (21 CFR 11.200). A wrong
+        # password counts towards the lockout but does not end the session.
+        try:
+            ok, grant = await auth.confirm_signature(user, body.password, client_ip=ip)
+        except auth.Locked as exc:
+            raise HTTPException(423, f"Your account is locked until "
+                                     f"{exc.until.strftime('%H:%M UTC')} after too many "
+                                     f"attempts.") from exc
+        if not ok:
+            raise HTTPException(403, "That password isn't right.")
+        if grant is not None:
+            # Signing re-proved the password to Cronos: keep the fresh tokens it issued.
+            import store
+            await cronos_auth.save_grant(store.get_redis(), _session_token(request), grant,
+                                         auth.max_seconds())
 
     async with db.session() as session:
         document = await _document(session, document_id, user)
@@ -1293,13 +1298,17 @@ async def submit(document_id: str, body: SubmitRequest, request: Request) -> dic
                   "duty": _duty_details(right),
                   "images": sorted(blobstore.sha256_of((i.get("base64Data") or "").encode())
                                    for c in save["crfs"] for i in c.get("images") or [])}
+        # Without an e-signature this row is still who verified and submitted,
+        # bound to a hash of the record — just not a Part 11 signature.
         signature = db.Signature(document_id=document.id, username=user.username,
                                  full_name=user.full_name,
-                                 meaning=esource.MEANING_LABELS[body.meaning],
+                                 meaning=(esource.MEANING_LABELS[body.meaning] if esign
+                                          else esource.SUBMITTED_LABEL),
                                  record_sha256=esource.canonical_sha(record))
         session.add(signature)
         await session.flush()
-        await audit.record(session, "signature.applied", username=user.username,
+        await audit.record(session, "signature.applied" if esign else "submission.confirmed",
+                           username=user.username,
                            document=document, client_ip=ip, new_value=signature.meaning,
                            details={"signature_id": signature.id,
                                     "record_sha256": signature.record_sha256,
@@ -1603,6 +1612,17 @@ class UserPatch(BaseModel):
     active: Optional[bool] = None
     unlock: Optional[bool] = None
     password: Optional[str] = None
+
+
+@router.get("/admin/usage")
+async def usage(request: Request, days: int = 30) -> dict[str, Any]:
+    """AI token use and its cost over the last `days` days (see usage_report.py)."""
+    import usage_report
+
+    await admin(request)
+    days = max(1, min(days, 366))
+    until = db.utcnow()
+    return await usage_report.build(until - dt.timedelta(days=days), until)
 
 
 @router.get("/admin/users")

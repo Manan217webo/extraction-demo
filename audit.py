@@ -48,7 +48,7 @@ ACTIONS = {
     "ai.value_proposed", "ai.conflict_resolved",
     "field.changed", "field.alternate_accepted", "field.verified",
     "draft.saved", "draft.discarded",
-    "signature.applied", "signature.failed",
+    "signature.applied", "signature.failed", "submission.confirmed",
     "edc.submit_attempted", "edc.submitted", "edc.submit_unchanged", "edc.submit_failed",
     "audit.viewed", "audit.exported", "audit.verified",
     "duty.denied",

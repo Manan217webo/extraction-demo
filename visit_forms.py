@@ -228,6 +228,13 @@ def is_structured(crf: dict[str, Any]) -> bool:
     )
 
 
+def _int(value: Any) -> Optional[int]:
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _attributes(field: dict[str, Any]) -> dict[str, Any]:
     raw = field.get("vAttributes")
     if isinstance(raw, dict):
@@ -408,7 +415,12 @@ def _structured_group(container: dict[str, Any], cells: list[dict[str, Any]],
         "group_id": group_id,
         "label": container.get("field_name") or "Rows",
         "row_label": container.get("field_name") or "Row",
-        "max_instances": int(attributes.get("rows") or len(rows) or 1),
+        # The rows the EDC returned cells for are the rows it can store. A
+        # dynamic table can declare more ("rows" in vAttributes) than it has
+        # cells for yet; a value typed into such a row would have no field_id
+        # to go to, so only the rows with cells are offered.
+        "max_instances": len(rows) or 1,
+        "declared_rows": _int(attributes.get("rows")),
         "positional_rows": True,
         "row_names": labels,
         "fields": definitions,
@@ -747,6 +759,12 @@ def build_save(definition: dict[str, Any], form: dict[str, Any],
                 # The row-label column is ours, not the EDC's; it has nowhere to go.
                 if field.get("value") is not None and field.get("edc_index") is not None:
                     warnings.append(f"“{field['label']}” has no field in the EDC and was not sent.")
+                elif field.get("value") is not None and row is not None \
+                        and not field.get("row_name"):
+                    # A table row the EDC holds no cells for: never lose it quietly.
+                    warnings.append(f"“{field['label']}” in row {row} of {meta['crfName']} has "
+                                    "no field in the EDC and was not sent. Add the row in the "
+                                    "EDC, then submit again.")
                 return
             # A value the field cannot hold — "abc" in a number, "Not done" where
             # the options are Normal/Abnormal — is kept on screen for the reviewer

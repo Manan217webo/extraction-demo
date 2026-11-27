@@ -1442,7 +1442,16 @@ mark.current { background: var(--purple); color: #fff; }
   padding: 4px 7px;
   overflow-wrap: anywhere;
 }
-.issue { color: var(--warn-ink); font-weight: 700; }
+/* Why a value's confidence is low. A tinted chip with dark ink rather than bare
+   amber text, so the reason stays readable at this size in both themes. */
+.issue {
+  padding: 1px 7px;
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-weight: 700;
+}
 .confidence {
   padding: 1px 7px;
   border-radius: 999px;
@@ -1455,7 +1464,7 @@ mark.current { background: var(--purple); color: #fff; }
 .struck { color: var(--text-2); font-weight: 700; }
 .struck s { text-decoration-color: var(--danger); }
 .second-read { color: var(--text-2); font-weight: 700; }
-.issue.hard { color: var(--danger-ink); }
+.issue.hard { background: var(--danger-bg); border-color: var(--danger-line); color: var(--danger-ink); }
 .edited { color: var(--accent-ink); font-weight: 800; }
 
 /* ---------------------------------------------------------- form picker */

@@ -44,6 +44,14 @@ _NUMBER = re.compile(r"-?\d+(?:[.,]\d+)?")
 # Clinical trial sources are recent; anything older is a misread year.
 _OLDEST = datetime(2000, 1, 1)
 
+# A Date of Birth is the one date that is meant to be old. It is checked against
+# the oldest age eSource supports instead: a participant older than this is a
+# misread year, so the value is flagged and its confidence capped.
+MAX_AGE_YEARS = 100
+_BIRTH = re.compile(r"(birth|brth|\bdob\b|\bd\.o\.b\b)", re.I)
+_AGE = re.compile(r"^\s*(participant\s+|subject\s+|patient\s+)?age\b(?!.*\b(month|week|day)s?\b)",
+                  re.I)
+
 
 def _number(value: Any) -> Optional[float]:
     match = _NUMBER.search(str(value or ""))
@@ -177,6 +185,15 @@ def _check_performed(section: dict[str, Any]) -> None:
             _flag(gate, "nothing_recorded")
 
 
+def _is_birth_date(field: dict[str, Any]) -> bool:
+    return bool(_BIRTH.search(f"{field.get('label') or ''} {field.get('field_id') or ''}"))
+
+
+def age_on(born: datetime, today: datetime) -> int:
+    """Whole years from `born` to `today`, counting a birthday only once it has passed."""
+    return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
 def _check_dates(fields: list[dict[str, Any]], today: datetime) -> None:
     for field in fields:
         if field.get("type") != "date" or not _filled(field):
@@ -186,8 +203,23 @@ def _check_dates(fields: list[dict[str, Any]], today: datetime) -> None:
             continue
         if when > today + timedelta(days=1):
             _flag(field, "date_in_future")
+        elif _is_birth_date(field):
+            if age_on(when, today) > MAX_AGE_YEARS:
+                _flag(field, "age_over_limit")
         elif when < _OLDEST:
             _flag(field, "date_too_old")
+
+
+def _check_ages(fields: list[dict[str, Any]]) -> None:
+    """An Age written as a number must fit the same range a Date of Birth does."""
+    for field in fields:
+        if field.get("type") != "number" or not _filled(field):
+            continue
+        if not _AGE.search(str(field.get("label") or "")):
+            continue
+        value = _number(field["value"])
+        if value is not None and not 0 <= value <= MAX_AGE_YEARS:
+            _flag(field, "age_over_limit")
 
 
 # --------------------------------------------------------------------------- entry
@@ -209,3 +241,4 @@ def apply(payload: dict[str, Any], now: Callable[[], datetime] = datetime.now) -
     for group in (payload.get("header") or {}).get("groups") or []:
         every.extend(group.get("fields") or [])
     _check_dates(every, today)
+    _check_ages(every)

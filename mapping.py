@@ -323,6 +323,7 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
     )
 
     sections = []
+    overflow: list[dict[str, Any]] = []
     for section in form.get("sections") or []:
         section_id = section["section_id"]
         region = regions.get(section.get("name") or "")
@@ -340,7 +341,20 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
                 row["instance"] for row in rows
                 if row.get("section_id") == section_id and row.get("group_id") == group_id
             })
-            instances = instances[: group.get("max_instances") or len(instances)]
+            # Rows filled on the page beyond the rows the EDC table has. They
+            # can't be shown or saved, so say so rather than drop them unseen.
+            limit = group.get("max_instances")
+            beyond = [
+                instance for instance in instances
+                if limit and instance > limit
+                and any(row.get("value") not in (None, "") for row in rows
+                        if row.get("section_id") == section_id
+                        and row.get("group_id") == group_id and row["instance"] == instance)
+            ]
+            if beyond:
+                overflow.append({"section": section.get("name"), "table": group.get("label"),
+                                 "rows_available": limit, "rows_read": max(beyond)})
+            instances = instances[: limit or len(instances)]
             if group.get("positional_rows"):
                 # Every row Cronos defines is shown, filled or not. The form on
                 # the right is the CRF as the EDC holds it; a row the scan did
@@ -404,6 +418,8 @@ def build_form(form: dict[str, Any], rows: list[dict[str, Any]],
         "visit": form.get("visit"),
         "sections": sections,
     }
+    if overflow:
+        built["table_overflow"] = overflow
     # Keep the EDC visit triple on the client payload so a save after a Redis
     # miss can re-load the visit without asking the reviewer again.
     if form.get("edc"):

@@ -34,7 +34,23 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Protocol
 
+# Upload limits, shared by the browser upload and the file-server sources.
+# A scanned source page is never smaller than MIN_UPLOAD_KB; anything that small
+# is a blank, truncated or placeholder file, so it is turned away before a read.
 MAX_FILE_BYTES = max(1, int(os.getenv("MAX_UPLOAD_MB") or 200)) * 1024 * 1024
+MIN_FILE_BYTES = max(1, int(os.getenv("MIN_UPLOAD_KB") or 10)) * 1024
+
+
+def size_problem(name: str, size: int) -> Optional[str]:
+    """Why a file of this size can't be taken, or None when it can."""
+    if size <= 0:
+        return f"“{name}” appears to be empty."
+    if size < MIN_FILE_BYTES:
+        return (f"“{name}” is only {max(1, size // 1024)} KB. Files must be at least "
+                f"{MIN_FILE_BYTES // 1024} KB — check it isn't blank or cut short.")
+    if size > MAX_FILE_BYTES:
+        return f"“{name}” is over {MAX_FILE_BYTES // (1024 * 1024)} MB."
+    return None
 MAX_LIST = 5000
 MAX_SCAN_FILES = int(os.getenv("SCAN_MAX_FILES") or 2000)
 FS_TIMEOUT = float(os.getenv("SOURCE_TIMEOUT_SECONDS") or 20)
@@ -198,8 +214,9 @@ class LocalConnector:
         target = self._resolve(rel)
         if not target.is_file() or not target.name.lower().endswith(".pdf"):
             raise SourceError("That file no longer exists.", 404)
-        if target.stat().st_size > MAX_FILE_BYTES:
-            raise SourceError(f"“{target.name}” is over {MAX_FILE_BYTES // (1024 * 1024)} MB.")
+        problem = size_problem(target.name, target.stat().st_size)
+        if problem:
+            raise SourceError(problem)
         data = target.read_bytes()
         if not data.startswith(b"%PDF-"):
             raise SourceError(f"“{target.name}” isn't a readable PDF.")

@@ -6,6 +6,7 @@ const els = {
   workspace: $("workspace"),
   setupError: $("setup-error"),
   maxMb: $("max-mb"),
+  minKb: $("min-kb"),
   fileInput: $("file-input"),
   dropzone: $("dropzone"),
   fileCard: $("file-card"),
@@ -376,6 +377,16 @@ async function setFile(file) {
   }
   if (!file.name.toLowerCase().endsWith(".pdf") && file.type !== "application/pdf") {
     showError("That file isn't a PDF. Please choose a PDF document.");
+    return;
+  }
+  const maxBytes = (state.maxFileMb || 200) * 1024 * 1024;
+  const minBytes = (state.minFileKb || 10) * 1024;
+  if (file.size > maxBytes) {
+    showError(`That file is ${formatBytes(file.size)}. PDFs must be ${state.maxFileMb || 200} MB or smaller.`);
+    return;
+  }
+  if (file.size < minBytes) {
+    showError(`That file is only ${formatBytes(file.size)}. PDFs must be at least ${state.minFileKb || 10} KB — check it isn't blank or cut short.`);
     return;
   }
 
@@ -795,6 +806,7 @@ const ISSUE_TEXT = {
   answered_when_normal: "answered, but the row is Normal",
   date_in_future: "date is in the future",
   date_too_old: "date is implausibly old",
+  age_over_limit: "age is over 100 years",
 };
 // Raised by how the value was read rather than by what it is.
 const READING_ISSUES = new Set([
@@ -805,7 +817,7 @@ const READING_ISSUES = new Set([
 const CHECK_ISSUES = new Set([
   "implausible_value", "unit_mismatch", "systolic_not_above_diastolic",
   "contradicts_section", "nothing_recorded", "missing_when_abnormal",
-  "answered_when_normal", "date_in_future", "date_too_old",
+  "answered_when_normal", "date_in_future", "date_too_old", "age_over_limit",
 ]);
 
 /* Values in a section a reviewer should look at before saving. */
@@ -2604,6 +2616,15 @@ function renderForm(payload) {
         "for anything missing here."
     );
   }
+  (form.table_overflow || []).forEach((t) => {
+    inlineNotice(
+      els.formSections,
+      `${t.section}: the page has entries up to row ${t.rows_read} of “${t.table}”, but the ` +
+        `EDC table has ${t.rows_available} row${t.rows_available === 1 ? "" : "s"}. Rows ` +
+        "beyond that aren't shown and won't be sent — add the rows in the EDC and process " +
+        "the document again."
+    );
+  });
   if (payload.truncated) {
     inlineNotice(
       els.formSections,
@@ -3628,7 +3649,10 @@ async function loadAppSession() {
   state.reader = session.reader || null;
   state.mappingReady = Boolean((session.mapping || {}).ready);
   state.cronos = (session.mapping || {}).cronos || null;
-  els.maxMb.textContent = String(session.max_file_mb || 50);
+  state.maxFileMb = session.max_file_mb || 200;
+  state.minFileKb = session.min_file_kb || 10;
+  els.maxMb.textContent = String(state.maxFileMb);
+  if (els.minKb) els.minKb.textContent = String(state.minFileKb);
   if (!state.mappingReady) {
     els.stepper.querySelectorAll('button[data-step="header"], button[data-step="form"]')
       .forEach((button) => {
